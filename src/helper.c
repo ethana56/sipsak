@@ -70,6 +70,16 @@
 
 /* returns 1 if the string is an IP address, otherwise zero */
 int is_ip(char *str) {
+	struct in_addr addr4;
+	struct in6_addr addr6;
+	int result;
+	result = inet_pton(AF_INET, str, &addr4);
+	if (result == 1) return 1;
+	result = inet_pton(AF_INET6, str, &addr6);
+	return result == 1;
+}
+
+/*int is_ip(char *str) {
 	int octet = 0;
 
 	while (*str) {
@@ -88,7 +98,7 @@ int is_ip(char *str) {
 	}
 
 	return (*str == '\0' && octet == 4) ? 1 : 0;
-}
+}*/
 
 /* take either a dot.decimal string of ip address or a 
 domain name and returns a NETWORK ordered long int containing
