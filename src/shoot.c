@@ -890,11 +890,7 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 	msg_data.headers = options->headers;
 	msg_data.fqdn = fqdn;
 
-	init_network(&connection, options->local_ip
-#ifdef WITH_TLS_TRANSP
-      , options->ca_file
-#endif
-      );
+	init_network(&connection, options->local_ip, options->ca_file);
   if (msg_data.lport == 0) {
     msg_data.lport = connection.lport;
   }

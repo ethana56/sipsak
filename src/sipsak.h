@@ -205,10 +205,8 @@ struct sipsak_options {
   char *username;
   char *domainname;
   char *auth_username;
-#ifdef WITH_TLS_TRANSP
   char *cert_file;
   char *ca_file;
-#endif
   unsigned int transport;
   unsigned long address;
   regex_t *regex;

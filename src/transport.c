@@ -34,6 +34,9 @@
 #ifdef HAVE_ARPA_INET_H
 # include <arpa/inet.h>
 #endif
+#ifdef HAVE_NETDB_H
+# include <netdb.h>
+#endif
 
 #include "transport.h"
 #include "shoot.h"
@@ -570,175 +573,234 @@ void tls_dump_cert_info(char* s, X509* cert) {
 # endif /* USE_GNUTLS */
 #endif /* WITH_TLS_TRANSP */
 
-void init_network(struct sipsak_con_data *cd, char *local_ip
-#ifdef WITH_TLS_TRANSP
-    , char *ca_file
-#endif
-    ) {
-	socklen_t slen;
+static void set_port(struct sockaddr *adr, in_port_t port) {
+	if (adr->sa_family == AF_INET) {
+		((struct sockaddr_in *)adr)->sin_port = port;
+	} else if (adr->sa_family == AF_INET6) {
+		((struct sockaddr_in6 *)adr)->sin6_port = port;
+	}
+}
 
-  transport_str = NULL;
-  memset(&target_dot, 0, INET_ADDRSTRLEN);
-  memset(&source_dot, 0, INET_ADDRSTRLEN);
+static in_port_t get_port(struct sockaddr const *adr) {
+	in_port_t res = 0;
+
+	switch (adr->sa_family) {
+		case AF_INET:
+			res = ((struct sockaddr_in *)adr)->sin_port;
+			break;
+		case AF_INET6:
+			res = ((struct sockaddr_in6 *)adr)->sin6_port;
+			break;
+		default:
+			fprintf(stderr, "invalid sa_family %u\n", adr->sa_family);
+			exit_code(2, __PRETTY_FUNCTION__, "failed to get port, invalid sa family");
+			break;
+	}
+
+	return ntohs(res);
+}
+
 #ifdef RAW_SUPPORT
-	rawsock = -1;
+static int create_raw_sock(sa_family_t family) {
+	int res = 1;
+	rawsock = socket(family, SOCK_DGRAM, family == AF_INET ? IPPROTO_ICMP : IPPROTO_ICMPV6);
+	if (rawsock < 0) {
+		if (verbose > 1) {
+			fprintf(stderr, "warning: need raw socket (root priviledges) to receive all ICMP errors\n");
+		}
+		res = 0;
+	}
+	return res;
+}
 #endif
+
+void init_network_udp(struct sipsak_con_data *cd, char *local_ip) {
+	int created_raw_sock = 0;
+	char port_str[6];
+
+	struct addrinfo hints, *res, *res0;
+	transport_str = TRANSPORT_UDP_STR;
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_protocol = IPPROTO_UDP;
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_DGRAM;
+	hints.ai_flags = AI_PASSIVE;
+
+	if (snprintf(port_str, sizeof(port_str), "%d", cd->lport) >= sizeof(port_str)) {
+		fprintf(stderr, "lport of %d is larger than max port number\n", cd->lport);
+		exit_code(2, __PRETTY_FUNCTION__, "lport is larger than max port number");
+	}
+
+	if (getaddrinfo(NULL, port_str, &hints, &res0) < 0) {
+		perror("failed to find local address for binding");
+		exit_code(2, __PRETTY_FUNCTION__, "failed to find local address for binding");
+	}
+
+	for (res = res0; res; res = res->ai_next) {
+		if (res->ai_protocol == IPPROTO_UDP) {
+			break;
+		}
+	}
+	memcpy(&cd->adr, res->ai_addr, res->ai_addrlen);
+
+	if (!cd->symmetric) {
+		cd->usock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+		if (cd->usock < 0) {
+			perror("unconnected UDP socket creation failed");
+			exit_code(2, __PRETTY_FUNCTION__, "failed to create unconnected UDP socket");
+		}
+		if (bind(cd->usock, (struct sockaddr *)&cd->adr, sizeof(cd->adr)) < 0) {
+			perror("unconnected UDP socket binding failed");
+			exit_code(2, __PRETTY_FUNCTION__, "failed to bind unconnected UDP socket");
+		}
+		set_port((struct sockaddr *)&cd->adr, 0);
+	}
+
+	created_raw_sock = 0;
+#ifdef RAW_SUPPORT
+	created_raw_sock = create_raw_sock(res->ai_family);
+#endif
+
+	if (!created_raw_sock) {
+		/* create the connected socket as a primitive alternative to the raw socket */
+		cd->csock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+		if (cd->csock < 0) {
+			perror("connected UDP socket creation failed");
+			exit_code(2, __PRETTY_FUNCTION__, "failed to create connected UDP socket");
+		}
+		if (bind(cd->csock, (struct sockaddr *)&cd->adr, sizeof(cd->adr)) < 0) {
+			perror("connected UDP socket binding failed");
+			exit_code(2, __PRETTY_FUNCTION__, "failed to bind connected UDP socket");
+		}
+	}
+}
+
+void init_network_tcp(struct sipsak_con_data *cd, char *local_ip) {
+	struct addrinfo hints, *res;
+	char port_str[6];
+	transport_str = TRANSPORT_TCP_STR;
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_protocol = IPPROTO_TCP;
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE;
+	
+	if (snprintf(port_str, sizeof(port_str), "%d", cd->lport) >= sizeof(port_str)) {
+		fprintf(stderr, "lport of %d is larger than max port number\n", cd->lport);
+		exit_code(2, __PRETTY_FUNCTION__, "lport is larger than max port number");
+	}
+
+	if (getaddrinfo(NULL, port_str, &hints, &res) < 0) {
+		perror("failed to find local address for binding");
+		exit_code(2, __PRETTY_FUNCTION__, "failed to find local address for binding");
+	}
+
+	cd->csock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+	if (cd->csock < 0) {
+		perror("TCP socket creation failed");
+		exit_code(2, __PRETTY_FUNCTION__, "failed to create TCP socket");
+	}
+	if (bind(cd->csock, (struct sockaddr *)&cd->adr, sizeof(cd->adr)) < 0) {
+		perror("TCP socket binding failed");
+		exit_code(2, __PRETTY_FUNCTION__, "failed to bind TCP socket");
+	}
+}
+
+#ifdef WITH_TLS_TRANSP
+static void init_network_tls(struct sipsak_con_data *cd, char *local_ip, char *ca_file) {
+#ifdef USE_GNUTLS
+	tls_session = NULL;
+	xcred = NULL;
+	gnutls_global_init();
+	//gnutls_anon_allocate_client_credentials(&anoncred);
+	gnutls_certificate_allocate_credentials(&xcred);
+	if (ca_file != NULL) {
+		// set the trusted CA file
+		gnutls_certificate_set_x509_trust_file(xcred, ca_file, GNUTLS_X509_FMT_PEM);
+	}
+#else
+#ifdef USE_OPENSSL
+	ctx = NULL;
+	ssl = NULL;
+	SSL_library_init();
+	SSL_load_error_strings();
+#endif
+#endif
+
+	init_network_tcp(cd, local_ip);
+	transport_str = TRANSPORT_TLS_STR;
+
+
+#ifdef USE_GNUTLS
+	// initialixe the TLS session
+	gnutls_init(&tls_session, GNUTLS_CLIENT);
+	// use default priorities
+	gnutls_set_default_priority(tls_session);
+	// put the X509 credentials to the session
+	gnutls_credentials_set(tls_session, GNUTLS_CRD_CERTIFICATE, xcred);
+	// add the FD to the session
+# ifdef HAVE_GNUTLS_319
+	gnutls_transport_set_int(tls_session, cd->csock);
+# else
+	gnutls_transport_set_ptr(tls_session, (gnutls_transport_ptr_t)(intptr_t)cd->csock);
+# endif
+#else /* USE_GNUTLS */
+# ifdef USE_OPENSSL
+	create_tls_ctx();
+	ssl = SSL_new(ctx);
+	if (ssl == NULL) {
+		perror("TLS failed to create SSL object");
+		exit_code(2, __PRETTY_FUNCTION__, "failed to create SSL object");
+	}
+	if (SSL_set_fd(ssl, cd->csock) != 1) {
+		perror("TLS failed to add socket to SSL object");
+		exit_code(2, __PRETTY_FUNCTION__, "failed to add socket to SSL object");
+	}
+#endif /* USE_OPENSSL */
+#endif /* USE_GNUTLS */
+	dbg("initialized tls socket %i\n", cd->csock);
+}
+#endif
+
+void get_listening_port(struct sipsak_con_data *cd) {
+
+	socklen_t adr_size = sizeof(cd->adr);
+
+	if (cd->lport == 0) {
+		memset(&cd->adr, 0, sizeof(cd->adr));
+		if (cd->symmetric || cd->transport != SIP_UDP_TRANSPORT) {
+			getsockname(cd->csock, (struct sockaddr *)&cd->adr, &adr_size);
+		} else {
+			getsockname(cd->usock, (struct sockaddr *)&cd->adr, &adr_size);
+		}
+		cd->lport = get_port((struct sockaddr *)&cd->adr);
+	}
+}
+
+void init_network(struct sipsak_con_data *cd, char *local_ip, char *ca_file) {
+
+	/*TODO: deal with target_dot and source_dot*/
+
+	/*TODO: deal with raw socket support*/
 
 	switch (cd->transport) {
 #ifdef WITH_TLS_TRANSP
 		case SIP_TLS_TRANSPORT:
-			transport_str = TRANSPORT_TLS_STR;
+			init_network_tls(cd, local_ip, ca_file);
 			break;
-#endif /* WITH_TLS_TRANSP */
+#endif
 		case SIP_TCP_TRANSPORT:
-			transport_str = TRANSPORT_TCP_STR;
+			init_network_tcp(cd, local_ip);
 			break;
 		case SIP_UDP_TRANSPORT:
-			transport_str = TRANSPORT_UDP_STR;
+			init_network_udp(cd, local_ip);
 			break;
 		default:
 			fprintf(stderr, "unknown transport: %u\n", cd->transport);
-			exit_code(2, __PRETTY_FUNCTION__, "unknown transport");
+			exit_code(2, __PRETTY_FUNCTION__, "unkown transport");
 	}
 
-#ifdef WITH_TLS_TRANSP
-	if (cd->transport == SIP_TLS_TRANSPORT) {
-# ifdef USE_GNUTLS
-    tls_session = NULL;
-    xcred = NULL;
-
-		gnutls_global_init();
-		//gnutls_anon_allocate_client_credentials(&anoncred);
-		gnutls_certificate_allocate_credentials(&xcred);
-		if (ca_file != NULL) {
-			// set the trusted CA file
-			gnutls_certificate_set_x509_trust_file(xcred, ca_file, GNUTLS_X509_FMT_PEM);
-		}
-# else
-#  ifdef USE_OPENSSL
-    ctx = NULL;
-    ssl = NULL;
-
-		SSL_library_init();
-		SSL_load_error_strings();
-#  endif
-# endif
-	}
-#endif /* WITH_TLS_TRANSP */
-
-	memset(&(cd->adr), 0, sizeof(struct sockaddr_in));
-	cd->adr.sin_family = AF_INET;
-	if(local_ip) {	
-		cd->adr.sin_addr.s_addr = inet_addr(local_ip);
-	} else {
-		cd->adr.sin_addr.s_addr = htonl(INADDR_ANY);
-	}
-	cd->adr.sin_port = htons((short)cd->lport);
-
-	if (cd->transport == SIP_UDP_TRANSPORT) {
-		/* create the un-connected socket */
-		if (!cd->symmetric) {
-			cd->usock = (int)socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
-			if (cd->usock==-1) {
-				perror("unconnected UDP socket creation failed");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to create unconnected UDP socket");
-			}
-			if (bind(cd->usock, (struct sockaddr *) &(cd->adr), sizeof(struct sockaddr_in) )==-1) {
-				perror("unconnected UDP socket binding failed");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to bind unconnected UDP socket");
-			}
-		}
-
-#ifdef RAW_SUPPORT
-		/* try to create the raw socket */
-		rawsock = (int)socket(PF_INET, SOCK_RAW, IPPROTO_ICMP);
-		if (rawsock==-1) {
-			if (verbose>1)
-				fprintf(stderr, "warning: need raw socket (root privileges) to receive all ICMP errors\n");
-#endif
-			/* create the connected socket as a primitve alternative to the 
-			   raw socket*/
-			cd->csock = (int)socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
-			if (cd->csock==-1) {
-				perror("connected UDP socket creation failed");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to create connected UDP socket");
-			}
-
-			if (!cd->symmetric)
-				cd->adr.sin_port = htons((short)0);
-			if (bind(cd->csock, (struct sockaddr *) &(cd->adr), sizeof(struct sockaddr_in) )==-1) {
-				perror("connected UDP socket binding failed");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to bind connected UDP socket");
-			}
-#ifdef RAW_SUPPORT
-		}
-		else if (cd->symmetric) {
-			cd->csock = (int)socket(PF_INET, SOCK_DGRAM, IPPROTO_UDP);
-			if (cd->csock==-1) {
-				perror("connected UDP socket creation failed");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to create connected UDP socket");
-			}
-			if (bind(cd->csock, (struct sockaddr *) &(cd->adr), sizeof(struct sockaddr_in) )==-1) {
-				perror("connected UDP socket binding failed");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to bind connected UDP socket");
-			}
-		}
-#endif
-	}
-	else {
-		cd->csock = (int)socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-		if (cd->csock==-1) {
-			perror("TCP socket creation failed");
-			exit_code(2, __PRETTY_FUNCTION__, "failed to create TCP socket");
-		}
-		if (bind(cd->csock, (struct sockaddr *) &(cd->adr), sizeof(struct sockaddr_in) )==-1) {
-			perror("TCP socket binding failed");
-			exit_code(2, __PRETTY_FUNCTION__, "failed to bind TCP socket");
-		}
-#ifdef WITH_TLS_TRANSP
-		if (cd->transport == SIP_TLS_TRANSPORT) {
-#ifdef USE_GNUTLS
-			// initialixe the TLS session
-			gnutls_init(&tls_session, GNUTLS_CLIENT);
-			// use default priorities
-			gnutls_set_default_priority(tls_session);
-			// put the X509 credentials to the session
-			gnutls_credentials_set(tls_session, GNUTLS_CRD_CERTIFICATE, xcred);
-			// add the FD to the session
-# ifdef HAVE_GNUTLS_319
-			gnutls_transport_set_int(tls_session, cd->csock);
-# else
-			gnutls_transport_set_ptr(tls_session, (gnutls_transport_ptr_t)(intptr_t)cd->csock);
-# endif
-#else /* USE_GNUTLS */
-# ifdef USE_OPENSSL
-			create_tls_ctx();
-			ssl = SSL_new(ctx);
-			if (ssl == NULL) {
-				perror("TLS failed to create SSL object");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to create SSL object");
-			}
-			if (SSL_set_fd(ssl, cd->csock) != 1) {
-				perror("TLS failed to add socket to SSL object");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to add socket to SSL object");
-			}
-# endif /* USE_OPENSSL */
-#endif /* USE_GNUTLS */
-			dbg("initialized tls socket %i\n", cd->csock);
-		}
-#endif /* WITH_TLS_TRANSP */
-	}
-
-	/* for the via line we need our listening port number */
-	if (cd->lport==0){
-		memset(&(cd->adr), 0, sizeof(struct sockaddr_in));
-		slen=sizeof(struct sockaddr_in);
-		if (cd->symmetric || cd->transport != SIP_UDP_TRANSPORT)
-			getsockname(cd->csock, (struct sockaddr *) &(cd->adr), &slen);
-		else
-			getsockname(cd->usock, (struct sockaddr *) &(cd->adr), &slen);
-		cd->lport=ntohs(cd->adr.sin_port);
-	}
+	get_listening_port(cd);
 }
 
 void shutdown_network() {

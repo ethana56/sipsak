@@ -102,7 +102,7 @@ int is_ip(char *str) {
 
 /* take either a dot.decimal string of ip address or a 
 domain name and returns a NETWORK ordered long int containing
-the address. i chose to internally represent the address as long for speedier
+the address. I chose to internally represent the address as long for speedier
 comparisons.
 
 any changes to getaddress have to be patched back to the net library.

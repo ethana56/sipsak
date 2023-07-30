@@ -40,8 +40,30 @@ struct sipsak_sr_time {
 	int timing;
 };
 
-struct sipsak_con_data {
+/*struct sipsak_con_data {
 	struct sockaddr_in adr;
+	unsigned int transport;
+	unsigned long address;
+	int csock;
+	int usock;
+	int dontsend;
+	int dontrecv;
+	int connected;
+	int symmetric;
+	int lport;
+	int rport;
+	char *buf_tmp;
+	int buf_tmp_size;
+};*/
+
+typedef union sipsak_sockaddr {
+	struct sockaddr adr;
+	struct sockaddr_in in;
+	struct sockaddr_in6 in6;
+} sipsak_sockaddr;
+
+struct sipsak_con_data {
+	union sipsak_sockaddr adr;
 	unsigned int transport;
 	unsigned long address;
 	int csock;
@@ -75,11 +97,7 @@ struct sipsak_delay {
 
 extern char *transport_str;
 
-void init_network(struct sipsak_con_data *cd, char *local_ip
-#ifdef WITH_TLS_TRANSP
-    , char *ca_file
-#endif
-    );
+void init_network(struct sipsak_con_data *cd, char *local_ip, char *ca_file);
 
 void shutdown_network();
 
