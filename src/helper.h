@@ -54,7 +54,7 @@
 # define SRV_SIP_UDP "_sip._udp"
 #endif
 
-int is_ip(char *str);
+int is_ip(char const *str);
 
 unsigned long getaddress(char *host);
 
@@ -81,6 +81,16 @@ int is_number(char *number);
 int str_to_int(int mode, char *num);
 
 int read_stdin(char *buf, int size, int ret);
+
+void construct_sipsak_address(struct sipsak_address *address, char const *address_str, int port);
+
+void destroy_sipsak_addresses(struct sipsak_address *addresses, size_t num_addresses);
+
+size_t get_addresses(struct sipsak_address **addresses, char const *domain, unsigned int port, int *transport);
+
+char const *sipsak_address_stringify(struct sipsak_address const *address);
+
+void *safe_malloc(size_t size);
 
 void *str_alloc(size_t size);
 

@@ -19,6 +19,7 @@
 
 #include "sipsak.h"
 #include "shoot.h"
+#include "error.h"
 
 #include <time.h>
 #ifdef HAVE_SYS_TIME_H
@@ -27,6 +28,10 @@
 #ifdef HAVE_SYS_SOCKET_H
 # include <sys/socket.h>
 #endif
+
+#define NO_IP_PREF 0
+#define PREF_IPV4  1
+#define PREF_IPV6  2
 
 struct sipsak_sr_time {
 	struct timeval sendtime;
@@ -56,24 +61,37 @@ struct sipsak_sr_time {
 	int buf_tmp_size;
 };*/
 
-typedef union sipsak_sockaddr {
-	struct sockaddr adr;
-	struct sockaddr_in in;
-	struct sockaddr_in6 in6;
-} sipsak_sockaddr;
+enum sipsak_con_error_type {
+	ADDRINFO,
+	REBIND_CONN,
+};
+
+union sipsak_con_error_sys {
+	int error_errno;
+	int error_gai;
+};
+
+struct sipsak_con_error {
+	enum sipsak_con_error_type type;
+	union sipsak_con_error_sys sys_code;
+};
 
 struct sipsak_con_data {
-	union sipsak_sockaddr adr;
-	unsigned int transport;
-	unsigned long address;
+	union sipsak_sockaddr from_adr;
+	union sipsak_sockaddr to_adr;
+	int transport;
+	//union sipsak_sockaddr address;
+	/*unsigned long address;*/
+	struct sipsak_address *addresses;
+	size_t num_addresses, cur_address;
 	int csock;
 	int usock;
 	int dontsend;
 	int dontrecv;
 	int connected;
 	int symmetric;
-	int lport;
-	int rport;
+	in_port_t lport;
+	in_port_t rport;
 	char *buf_tmp;
 	int buf_tmp_size;
 };
@@ -97,7 +115,11 @@ struct sipsak_delay {
 
 extern char *transport_str;
 
-void init_network(struct sipsak_con_data *cd, char *local_ip, char *ca_file);
+void set_addresses(struct sipsak_con_data *cd, struct sipsak_address *addresses, size_t num_addresses);
+
+struct sipsak_address const *get_cur_address(struct sipsak_con_data *cd);
+
+sipsak_err init_network(struct sipsak_con_data *cd, char const *local_ip, char const *ca_file);
 
 void shutdown_network();
 
@@ -110,10 +132,5 @@ int recv_message(char *buf, int size, int inv_trans,
 			struct sipsak_regexp *reg, enum sipsak_modes mode, int cseq_counter,
       char *request, char *response);
 
-int set_target(struct sockaddr_in *adr, unsigned long target, int port,
-    int socket, int connected, unsigned int transport, char *domainname
-#ifdef WITH_TLS_TRANSP
-    , int ignore_ca_fail
-#endif
-    );
+sipsak_err set_target(struct sipsak_con_data *con, char const *domainname, int ignore_ca_fail);
 #endif

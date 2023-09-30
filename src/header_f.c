@@ -615,6 +615,8 @@ char* uri_from_contact(char *message)
 	
 	*end = c;
 
+	printf("TMP: %s\n", tmp);
+
 	return tmp;
 }
 

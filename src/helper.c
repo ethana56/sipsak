@@ -63,13 +63,14 @@
 
 #include "helper.h"
 #include "exit_code.h"
+#include "error.h"
 
 #if defined(RUNNING_CHECK) && !defined(HAVE_CHECK_H)
   #error Missing check unit test framework!
 #endif
 
 /* returns 1 if the string is an IP address, otherwise zero */
-int is_ip(char *str) {
+int is_ip(char const *str) {
 	struct in_addr addr4;
 	struct in6_addr addr6;
 	int result;
@@ -112,6 +113,34 @@ contact: farhan@hotfoon.com
   this is convenient as 0 means 'this' host and the traffic of
   a badly behaving dns system remains inside (you send to 0.0.0.0)
 */
+
+int resolve(char const *address, unsigned short port, int transport, int family, int binding, struct addrinfo **adrs) {
+	struct addrinfo hints;
+	int addrinfo_res;
+
+	char port_str[6];
+
+	memset(&hints, 0, sizeof(hints));
+
+	switch (transport) {
+		case SIP_UDP_TRANSPORT:
+			hints.ai_socktype = SOCK_DGRAM;
+			hints.ai_protocol = IPPROTO_UDP;
+			break;
+		case SIP_TLS_TRANSPORT:
+		case SIP_TCP_TRANSPORT:
+			hints.ai_socktype = SOCK_STREAM;
+			hints.ai_protocol = IPPROTO_TCP;
+			break;
+	}
+
+	hints.ai_family = family;
+	hints.ai_flags = binding ? AI_PASSIVE : 0;
+
+	(void)snprintf(port_str, sizeof(port_str), "%hu", port);
+	addrinfo_res = getaddrinfo(address, port_str, &hints, adrs);
+	return addrinfo_res;
+}
 
 unsigned long getaddress(char *host) {
 	struct hostent* pent;
@@ -788,6 +817,72 @@ int read_stdin(char *buf, int size, int ret) {
 	if (verbose)
 		fprintf(stderr, "warning: readin buffer size exceeded\n");
 	return i;
+}
+
+char *cpy_str_alloc(char const *str) {
+	size_t len;
+	char *new_str;
+	len = strlen(str);
+	new_str = safe_malloc(len + 1);
+	strcpy(new_str, str);
+	return new_str;
+}
+
+void construct_sipsak_address(struct sipsak_address *address, char const *address_str, int port) {
+	if (port == 0) {
+		address->port = 5060;
+	} else if (port < 0 || port > 65535) {
+		fprintf(stderr, "port %d is out of range.", port);
+		exit_code(2, __PRETTY_FUNCTION__, "port is out of range");
+	} else {
+		address->port = port;
+	}
+	address->address = cpy_str_alloc(address_str);
+}
+
+void destroy_sipsak_address(struct sipsak_address *address) {
+	free(address->address);
+	address->address = NULL;
+	address->port = 0;
+}
+
+void destroy_sipsak_addresses(struct sipsak_address *addresses, size_t num_addresses) {
+	size_t i;
+	for (i = 0; i < num_addresses; ++i) {
+		destroy_sipsak_address(&addresses[i]);
+	}
+	free(addresses);
+}
+
+static size_t create_address_no_lookup(struct sipsak_address **address, char const *host, unsigned int port) {
+	*address = safe_malloc(sizeof(struct sipsak_address));
+	construct_sipsak_address(*address, host, port);
+	return 1;
+}
+
+size_t get_addresses(struct sipsak_address **addresses, char const *host, unsigned int port, int *transport) {
+	size_t num_addresses = 0;
+	if (!is_ip(host) && !port) {
+		/*num_addresses = getsrvaddress(addresses, host, transport);*/
+	}
+	if (num_addresses == 0) {
+		num_addresses = create_address_no_lookup(addresses, host, port);
+	}
+	return num_addresses;
+}
+
+char const *sipsak_address_stringify(struct sipsak_address const *address) {
+	return address ? address->address : "";
+}
+
+void *safe_malloc(size_t size) {
+	void *ptr;
+	ptr = malloc(size);
+	if (ptr == NULL) {
+		fprintf(stderr, "errpr: memory allocation for %lu bytes failed\n", size);
+		exit_code(255, __PRETTY_FUNCTION__, "memory allocation failure");
+	}
+	return ptr;
 }
 
 /* tries to allocate the given size of memory and sets it all to zero.

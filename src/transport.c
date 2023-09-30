@@ -16,6 +16,7 @@
 #include "sipsak.h"
 
 #include <time.h>
+#include <errno.h>
 #ifdef HAVE_SYS_TIME_H
 # include <sys/time.h>
 #endif
@@ -96,9 +97,10 @@
 #include "exit_code.h"
 #include "helper.h"
 #include "header_f.h"
+#include "error.h"
 
 char *transport_str;
-char target_dot[INET_ADDRSTRLEN], source_dot[INET_ADDRSTRLEN];
+char target_dot[INET6_ADDRSTRLEN], source_dot[INET6_ADDRSTRLEN];
 
 #ifdef RAW_SUPPORT
 int rawsock;
@@ -573,23 +575,15 @@ void tls_dump_cert_info(char* s, X509* cert) {
 # endif /* USE_GNUTLS */
 #endif /* WITH_TLS_TRANSP */
 
-static void set_port(struct sockaddr *adr, in_port_t port) {
-	if (adr->sa_family == AF_INET) {
-		((struct sockaddr_in *)adr)->sin_port = port;
-	} else if (adr->sa_family == AF_INET6) {
-		((struct sockaddr_in6 *)adr)->sin6_port = port;
-	}
-}
-
 static in_port_t get_port(struct sockaddr const *adr) {
 	in_port_t res = 0;
 
 	switch (adr->sa_family) {
 		case AF_INET:
-			res = ((struct sockaddr_in *)adr)->sin_port;
+			res = ((struct sockaddr_in const *)adr)->sin_port;
 			break;
 		case AF_INET6:
-			res = ((struct sockaddr_in6 *)adr)->sin6_port;
+			res = ((struct sockaddr_in6 const *)adr)->sin6_port;
 			break;
 		default:
 			fprintf(stderr, "invalid sa_family %u\n", adr->sa_family);
@@ -598,6 +592,63 @@ static in_port_t get_port(struct sockaddr const *adr) {
 	}
 
 	return ntohs(res);
+}
+
+static int resolve(char const *address, unsigned short port, int transport, int family, int binding, struct addrinfo **adrs) {
+	struct addrinfo hints;
+	int addrinfo_res;
+
+	char port_str[6];
+
+	memset(&hints, 0, sizeof(hints));
+
+	switch (transport) {
+		case SIP_UDP_TRANSPORT:
+			hints.ai_socktype = SOCK_DGRAM;
+			hints.ai_protocol = IPPROTO_UDP;
+			break;
+		case SIP_TLS_TRANSPORT:
+		case SIP_TCP_TRANSPORT:
+			hints.ai_socktype = SOCK_STREAM;
+			hints.ai_protocol = IPPROTO_TCP;
+			break;
+	}
+
+	/*hints.ai_family = family;*/
+	hints.ai_family = PF_INET;
+	hints.ai_flags = binding ? AI_PASSIVE : 0;
+
+	(void)snprintf(port_str, sizeof(port_str), "%hu", port);
+	addrinfo_res = getaddrinfo(address, port_str, &hints, adrs);
+	return addrinfo_res;
+}
+
+static sipsak_err get_bound_socket(struct addrinfo *addrs, int *sock, union sipsak_sockaddr *sock_addr) {
+	struct addrinfo *cur_addr;
+	int errno_backup;
+
+	for (cur_addr = addrs; cur_addr; cur_addr = cur_addr->ai_next) {
+		*sock = socket(cur_addr->ai_family, cur_addr->ai_socktype, cur_addr->ai_protocol);
+		if (*sock < 0) {
+			continue;
+		}
+		if (bind(*sock, cur_addr->ai_addr, cur_addr->ai_addrlen) >= 0) {
+			memcpy(sock_addr, cur_addr->ai_addr, cur_addr->ai_addrlen);
+			break;
+		}
+		errno_backup = errno;
+		close(*sock);
+		errno = errno_backup;
+	}
+	return cur_addr ? SIPSAK_ERR_SUCCESS : SIPSAK_ERR_NO_IP;
+}
+
+static void get_socket_address(int socket, struct sockaddr *adr, socklen_t adr_len) {
+	memset(adr, 0, adr_len);
+	if (getsockname(socket, adr, &adr_len) < 0) {
+		perror("getsockname error");
+		exit_code(2, __PRETTY_FUNCTION__, "getsockname error");
+	}
 }
 
 #ifdef RAW_SUPPORT
@@ -614,100 +665,137 @@ static int create_raw_sock(sa_family_t family) {
 }
 #endif
 
-void init_network_udp(struct sipsak_con_data *cd, char *local_ip) {
+static sipsak_err init_network_udp_non_symmetric(struct sipsak_con_data *cd, char const *local_ip) {
+	int errno_backup;
+
+	sipsak_err err;
+
 	int created_raw_sock = 0;
-	char port_str[6];
+	struct addrinfo *res;
+	int addrinfo_res;
 
-	struct addrinfo hints, *res, *res0;
-	transport_str = TRANSPORT_UDP_STR;
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_protocol = IPPROTO_UDP;
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_DGRAM;
-	hints.ai_flags = AI_PASSIVE;
+	union sipsak_sockaddr listen_adr;
 
-	if (snprintf(port_str, sizeof(port_str), "%d", cd->lport) >= sizeof(port_str)) {
-		fprintf(stderr, "lport of %d is larger than max port number\n", cd->lport);
-		exit_code(2, __PRETTY_FUNCTION__, "lport is larger than max port number");
+	addrinfo_res = resolve(local_ip, cd->lport, cd->transport, PF_UNSPEC, 1, &res);
+	if (addrinfo_res != 0) {
+		return translate_gai_err(addrinfo_res);
 	}
 
-	if (getaddrinfo(NULL, port_str, &hints, &res0) < 0) {
-		perror("failed to find local address for binding");
-		exit_code(2, __PRETTY_FUNCTION__, "failed to find local address for binding");
+	err = get_bound_socket(res, &cd->usock, &listen_adr);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		goto err;
 	}
+	freeaddrinfo(res);
 
-	for (res = res0; res; res = res->ai_next) {
-		if (res->ai_protocol == IPPROTO_UDP) {
-			break;
-		}
-	}
-	memcpy(&cd->adr, res->ai_addr, res->ai_addrlen);
-
-	if (!cd->symmetric) {
-		cd->usock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-		if (cd->usock < 0) {
-			perror("unconnected UDP socket creation failed");
-			exit_code(2, __PRETTY_FUNCTION__, "failed to create unconnected UDP socket");
-		}
-		if (bind(cd->usock, (struct sockaddr *)&cd->adr, sizeof(cd->adr)) < 0) {
-			perror("unconnected UDP socket binding failed");
-			exit_code(2, __PRETTY_FUNCTION__, "failed to bind unconnected UDP socket");
-		}
-		set_port((struct sockaddr *)&cd->adr, 0);
-	}
-
-	created_raw_sock = 0;
 #ifdef RAW_SUPPORT
-	created_raw_sock = create_raw_sock(res->ai_family);
-#endif
+ 	created_raw_sock = create_raw_sock(listen_adr.adr.sa_family);
+#endif /* RAW_SUPPORT */
 
 	if (!created_raw_sock) {
-		/* create the connected socket as a primitive alternative to the raw socket */
-		cd->csock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-		if (cd->csock < 0) {
-			perror("connected UDP socket creation failed");
-			exit_code(2, __PRETTY_FUNCTION__, "failed to create connected UDP socket");
+		/* Rather than PF_UNSPEC, this should probably be listen_adr.adr.family */
+		addrinfo_res = resolve(local_ip, 0, cd->transport, PF_UNSPEC, 1, &res);
+		if (addrinfo_res != 0) {
+			return translate_gai_err(addrinfo_res);
 		}
-		if (bind(cd->csock, (struct sockaddr *)&cd->adr, sizeof(cd->adr)) < 0) {
-			perror("connected UDP socket binding failed");
-			exit_code(2, __PRETTY_FUNCTION__, "failed to bind connected UDP socket");
+		err = get_bound_socket(res, &cd->csock, &listen_adr);
+		if (err != SIPSAK_ERR_SUCCESS) {
+			goto err;
 		}
+		freeaddrinfo(res);
 	}
+
+	get_socket_address(cd->usock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
+	cd->lport = get_port((struct sockaddr *)&cd->from_adr);
+	return SIPSAK_ERR_SUCCESS;
+
+err:
+	errno_backup = errno;
+	freeaddrinfo(res);
+	errno = errno_backup;
+	return err;
 }
 
-void init_network_tcp(struct sipsak_con_data *cd, char *local_ip) {
-	struct addrinfo hints, *res;
-	char port_str[6];
-	transport_str = TRANSPORT_TCP_STR;
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_protocol = IPPROTO_TCP;
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_flags = AI_PASSIVE;
-	
-	if (snprintf(port_str, sizeof(port_str), "%d", cd->lport) >= sizeof(port_str)) {
-		fprintf(stderr, "lport of %d is larger than max port number\n", cd->lport);
-		exit_code(2, __PRETTY_FUNCTION__, "lport is larger than max port number");
+static sipsak_err init_network_udp_symmetric(struct sipsak_con_data *cd, char const* local_ip) {
+	int errno_backup;
+
+	sipsak_err err;
+
+	struct addrinfo *res;
+	int addrinfo_res;
+
+	union sipsak_sockaddr listen_adr;
+
+	addrinfo_res = resolve(local_ip, cd->lport, cd->transport, PF_UNSPEC, 1, &res);
+	if (addrinfo_res != 0) {
+		return translate_gai_err(addrinfo_res);
 	}
 
-	if (getaddrinfo(NULL, port_str, &hints, &res) < 0) {
-		perror("failed to find local address for binding");
-		exit_code(2, __PRETTY_FUNCTION__, "failed to find local address for binding");
+	err = get_bound_socket(res, &cd->csock, &listen_adr);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		goto err;
 	}
+	freeaddrinfo(res);
 
-	cd->csock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-	if (cd->csock < 0) {
-		perror("TCP socket creation failed");
-		exit_code(2, __PRETTY_FUNCTION__, "failed to create TCP socket");
+#ifdef RAW_SUPPORT
+	(void)create_raw_sock(listen_adr.adr.sa_family);
+#endif /* RAW_SUPPORT */
+
+	get_socket_address(cd->csock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
+	cd->lport = get_port((struct sockaddr *)&cd->from_adr);
+
+	return SIPSAK_ERR_SUCCESS;
+
+err:
+	errno_backup = errno;
+	freeaddrinfo(res);
+	errno = errno_backup;
+	return err;
+}
+
+static sipsak_err init_network_udp(struct sipsak_con_data *cd, char const* local_ip) {
+	sipsak_err err;
+	if (cd->symmetric) {
+		err = init_network_udp_symmetric(cd, local_ip);
+	} else {
+		err = init_network_udp_non_symmetric(cd, local_ip);
 	}
-	if (bind(cd->csock, (struct sockaddr *)&cd->adr, sizeof(cd->adr)) < 0) {
-		perror("TCP socket binding failed");
-		exit_code(2, __PRETTY_FUNCTION__, "failed to bind TCP socket");
+	return err;
+}
+
+static sipsak_err init_network_tcp(struct sipsak_con_data *cd, char const *local_ip) {
+	int errno_backup;
+
+	sipsak_err err;
+
+	struct addrinfo *res;
+	int addrinfo_res;
+
+	union sipsak_sockaddr listen_adr;
+
+	addrinfo_res = resolve(local_ip, cd->lport, cd->transport, PF_UNSPEC, 1, &res);
+
+	if (addrinfo_res != 0) {
+		return translate_gai_err(addrinfo_res);
 	}
+	err = get_bound_socket(res, &cd->csock, &listen_adr);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		goto err;
+	}
+	freeaddrinfo(res);
+	get_socket_address(cd->csock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
+	cd->lport = get_port((struct sockaddr *)&cd->from_adr);
+	return SIPSAK_ERR_SUCCESS;
+
+err:
+	errno_backup = errno;
+	freeaddrinfo(res);
+	errno = errno_backup;
+	return err;
 }
 
 #ifdef WITH_TLS_TRANSP
-static void init_network_tls(struct sipsak_con_data *cd, char *local_ip, char *ca_file) {
+static sipsak_err init_network_tls(struct sipsak_con_data *cd, char const *local_ip, char const *ca_file) {
+	sipsak_err err;
 #ifdef USE_GNUTLS
 	tls_session = NULL;
 	xcred = NULL;
@@ -727,8 +815,10 @@ static void init_network_tls(struct sipsak_con_data *cd, char *local_ip, char *c
 #endif
 #endif
 
-	init_network_tcp(cd, local_ip);
-	transport_str = TRANSPORT_TLS_STR;
+	err = init_network_tcp(cd, local_ip);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		return err;
+	}
 
 
 #ifdef USE_GNUTLS
@@ -759,25 +849,12 @@ static void init_network_tls(struct sipsak_con_data *cd, char *local_ip, char *c
 #endif /* USE_OPENSSL */
 #endif /* USE_GNUTLS */
 	dbg("initialized tls socket %i\n", cd->csock);
+	return SIPSAK_ERR_SUCCESS;
 }
 #endif
 
-void get_listening_port(struct sipsak_con_data *cd) {
-
-	socklen_t adr_size = sizeof(cd->adr);
-
-	if (cd->lport == 0) {
-		memset(&cd->adr, 0, sizeof(cd->adr));
-		if (cd->symmetric || cd->transport != SIP_UDP_TRANSPORT) {
-			getsockname(cd->csock, (struct sockaddr *)&cd->adr, &adr_size);
-		} else {
-			getsockname(cd->usock, (struct sockaddr *)&cd->adr, &adr_size);
-		}
-		cd->lport = get_port((struct sockaddr *)&cd->adr);
-	}
-}
-
-void init_network(struct sipsak_con_data *cd, char *local_ip, char *ca_file) {
+sipsak_err init_network(struct sipsak_con_data *cd, char const *local_ip, char const *ca_file) {
+	sipsak_err err;
 
 	/*TODO: deal with target_dot and source_dot*/
 
@@ -786,21 +863,23 @@ void init_network(struct sipsak_con_data *cd, char *local_ip, char *ca_file) {
 	switch (cd->transport) {
 #ifdef WITH_TLS_TRANSP
 		case SIP_TLS_TRANSPORT:
-			init_network_tls(cd, local_ip, ca_file);
+			transport_str = TRANSPORT_TLS_STR;
+			err = init_network_tls(cd, local_ip, ca_file);
 			break;
 #endif
 		case SIP_TCP_TRANSPORT:
-			init_network_tcp(cd, local_ip);
+			transport_str = TRANSPORT_TCP_STR;
+			err = init_network_tcp(cd, local_ip);
 			break;
 		case SIP_UDP_TRANSPORT:
-			init_network_udp(cd, local_ip);
+			transport_str = TRANSPORT_UDP_STR;
+			err = init_network_udp(cd, local_ip);
 			break;
 		default:
-			fprintf(stderr, "unknown transport: %u\n", cd->transport);
-			exit_code(2, __PRETTY_FUNCTION__, "unkown transport");
+			err = SIPSAK_ERR_UNKNOWN_SIP_TRANSPORT;
 	}
 
-	get_listening_port(cd);
+	return err;
 }
 
 void shutdown_network() {
@@ -830,7 +909,8 @@ void send_message(char* mes, struct sipsak_con_data *cd,
 		/* lets fire the request to the server and store when we did */
 		if (cd->csock == -1) {
 			dbg("\nusing un-connected socket for sending\n");
-			ret = sendto(cd->usock, mes, strlen(mes), 0, (struct sockaddr *) &(cd->adr), sizeof(struct sockaddr));
+			ret = sendto(cd->usock, mes, strlen(mes), 0, (struct sockaddr *) &(cd->to_adr), sizeof(struct sockaddr));
+			//ret = sendto(cd->usock, mes, strlen(mes), 0, (struct sockaddr *) &(cd->from_adr), sizeof(struct sockaddr_in));
 		}
 		else {
 			dbg("\nusing connected socket for sending\n");
@@ -1036,6 +1116,17 @@ int check_for_message(char *recv, int size, struct sipsak_con_data *cd,
 		return -1;
 	}
 	return ret;
+}
+
+struct sipsak_address const *get_cur_address(struct sipsak_con_data *cd) {
+	return cd->cur_address == (size_t)-1 || cd->cur_address >= cd->num_addresses ? NULL : &cd->addresses[cd->cur_address];
+}
+
+void set_addresses(struct sipsak_con_data *cd, struct sipsak_address *addresses, size_t num_addresses) {
+	destroy_sipsak_addresses(cd->addresses, cd->num_addresses);
+	cd->addresses = addresses;
+	cd->num_addresses = num_addresses;
+	cd->cur_address = -1;
 }
 
 int complete_mes(char *mes, int size) {
@@ -1254,138 +1345,288 @@ int recv_message(char *buf, int size, int inv_trans,
 	return ret;
 }
 
-/* clears the given sockaddr, fills it with the given data and if a
- * socket is given connects the socket to the new target */
-int set_target(struct sockaddr_in *adr, unsigned long target, int port,
-    int socket, int connected, unsigned int transport, char *domainname
+static void set_target_dot(struct sockaddr *adr) {
+#ifdef HAVE_INET_NTOP
+	switch (adr->sa_family) {
+		case AF_INET:
+			inet_ntop(adr->sa_family, &((struct sockaddr_in *)adr)->sin_addr, target_dot, sizeof(target_dot));
+			break;
+		case AF_INET6:
+			inet_ntop(adr->sa_family, &((struct sockaddr_in6 *)adr)->sin6_addr, target_dot, sizeof(target_dot));
+			break;
+	}
+#endif /* HAVE_INET_NTOP */
+}
+
 #ifdef WITH_TLS_TRANSP
-    , int ignore_ca_fail
-#endif
-    ) {
-#ifdef WITH_TLS_TRANSP
-	int ret;
 # ifdef USE_OPENSSL
+static int set_target_with_openssl(struct sipsak_con_data *con, char *domainname, int connect_csock, int ignore_ca_fail) {
+	int ret;
 	int err;
 	X509* cert;
-# endif /* USE_OPENSSL */
-#endif /* WITH_TLS_TRANSP */
 
-	if (socket != -1 && transport != SIP_UDP_TRANSPORT && connected) {
-		if (shutdown(socket, SHUT_RDWR) != 0) {
-			perror("error while shutting down socket");
+	ret = SSL_connect(ssl);
+	if (ret == 1) {
+		dbg("TLS connect successful\n");
+		if (verbose > 2) {
+			printf("TLS connect: new connection using %s %s %d\n",
+			SSL_get_cipher_version(ssl), SSL_get_cipher_name(ssl),
+			SSL_get_cipher_bits(ssl, 0));
+		}
+		cert = SSL_get_peer_certificate(ssl);
+		if (cert != 0) {
+			tls_dump_cert_info("TLS connect: server certificate", cert);
+			if (SSL_get_verify_result(ssl) != X509_V_OK) {
+				perror("TLS connect: server certificate verification failed!!!\n");
+				exit_code(3, __PRETTY_FUNCTION__, "TLS server certificate verification falied");
+			}
+			X509_free(cert);
+		}
+		else {
+			perror("TLS connect: server did not present a certificate\n");
+			exit_code(3, __PRETTY_FUNCTION__, "missing TLS server certificate");
 		}
 	}
-
-	memset(adr, 0, sizeof(struct sockaddr_in));
-	adr->sin_addr.s_addr = target;
-	adr->sin_port = htons((short)port);
-	adr->sin_family = AF_INET;
-
-#ifdef HAVE_INET_NTOP
-	inet_ntop(adr->sin_family, &adr->sin_addr, &target_dot[0], INET_ADDRSTRLEN);
-#endif
-
-	if (socket != -1) {
-		if (connect(socket, (struct sockaddr *)adr, sizeof(struct sockaddr_in)) == -1) {
-			perror("connecting socket failed");
-			exit_code(2, __PRETTY_FUNCTION__, "connecting socket failed");
-		}
-#ifdef WITH_TLS_TRANSP
-		if (transport == SIP_TLS_TRANSPORT) {
-# ifdef USE_GNUTLS
-#  ifdef HAVE_GNUTLS_319
-			gnutls_handshake_set_timeout(tls_session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
-#  endif
-			ret = gnutls_handshake(tls_session);
-			if (ret < 0) {
-				dbg("TLS Handshake FAILED!!!\n");
-				gnutls_perror(ret);
-				exit_code(3, __PRETTY_FUNCTION__, "TLS handshake failed");
-			}
-			else if (verbose > 2) {
-				dbg(" TLS Handshake was completed!\n");
-				gnutls_session_info(tls_session);
-				if (verify_certificate_simple(tls_session, domainname, ignore_ca_fail) != 0) {
-					if (ignore_ca_fail == 1) {
-						if (verbose) {
-							printf("WARN: Ignoring verification failures of the server certificate\n");
-						}
-					} else {
-						if (verbose > 1) {
-							printf("TLS server certificate verification can be ignored with option --tls-ignore-cert-failure.\n");
-						}
-						exit_code(3, __PRETTY_FUNCTION__, "failure during TLS server certificate verification");
-					}
-				}
-				//verify_certificate_chain(tls_session, domainname, cert_chain, cert_chain_length);
-			}
-# else /* USE_GNUTLS */
-#  ifdef USE_OPENSSL
-			ret = SSL_connect(ssl);
-			if (ret == 1) {
-				dbg("TLS connect successful\n");
-				if (verbose > 2) {
-					printf("TLS connect: new connection using %s %s %d\n",
-						SSL_get_cipher_version(ssl), SSL_get_cipher_name(ssl),
-						SSL_get_cipher_bits(ssl, 0));
-				}
-				cert = SSL_get_peer_certificate(ssl);
-				if (cert != 0) {
-					tls_dump_cert_info("TLS connect: server certificate", cert);
-					if (SSL_get_verify_result(ssl) != X509_V_OK) {
-						perror("TLS connect: server certificate verification failed!!!\n");
-						exit_code(3, __PRETTY_FUNCTION__, "TLS server certificate verification falied");
-					}
-					X509_free(cert);
-				}
-				else {
-					perror("TLS connect: server did not present a certificate\n");
-					exit_code(3, __PRETTY_FUNCTION__, "missing TLS server certificate");
-				}
-			}
-			else {
-				err = SSL_get_error(ssl, ret);
-				switch (err) {
-					case SSL_ERROR_ZERO_RETURN:
-						perror("TLS handshake failed cleanly'n");
-						break;
-					case SSL_ERROR_WANT_READ:
-						perror("Need to get more data to finish TLS connect\n");
-						break;
-					case SSL_ERROR_WANT_WRITE:
-						perror("Need to send more data to finish TLS connect\n");
-						break;
+	else {
+		err = SSL_get_error(ssl, ret);
+		switch (err) {
+			case SSL_ERROR_ZERO_RETURN:
+				perror("TLS handshake failed cleanly'n");
+				break;
+			case SSL_ERROR_WANT_READ:
+				perror("Need to get more data to finish TLS connect\n");
+				break;
+			case SSL_ERROR_WANT_WRITE:
+				perror("Need to send more data to finish TLS connect\n");
+				break;
 #if OPENSSL_VERSION_NUMBER >= 0x00907000L /* 0.9.7 */
-					case SSL_ERROR_WANT_CONNECT:
-						perror("Need to retry connect\n");
-						break;
-					case SSL_ERROR_WANT_ACCEPT:
-						perror("Need to retry accept'n");
-						break;
+			case SSL_ERROR_WANT_CONNECT:
+				perror("Need to retry connect\n");
+				break;
+			case SSL_ERROR_WANT_ACCEPT:
+				perror("Need to retry accept'n");
+				break;
 #endif /* 0.9.7 */
-					case SSL_ERROR_WANT_X509_LOOKUP:
-						perror("Application callback asked to be called again\n");
-						break;
-					case SSL_ERROR_SYSCALL:
-						printf("TLS connect: %d\n", err);
-						if (!err) {
-							if (ret == 0) {
-								perror("Unexpected EOF occurred while performing TLS connect\n");
-							}
-							else {
-								printf("IO error: (%d) %s\n", errno, strerror(errno));
-							}
-						}
-						break;
-					default:
-						printf("TLS error: %d\n", err);
+			case SSL_ERROR_WANT_X509_LOOKUP:
+				perror("Application callback asked to be called again\n");
+				break;
+			case SSL_ERROR_SYSCALL:
+				printf("TLS connect: %d\n", err);
+				if (!err) {
+					if (ret == 0) {
+						perror("Unexpected EOF occurred while performing TLS connect\n");
+					}
+					else {
+						printf("IO error: (%d) %s\n", errno, strerror(errno));
+					}
 				}
-				exit_code(2, __PRETTY_FUNCTION__, "generic SSL error");
-			}
-#  endif /* USE_OPENSSL */
-# endif /* USE_GNUTLS */
+				break;
+			default:
+				printf("TLS error: %d\n", err);
 		}
-#endif /* WITH_TLS_TRANSP */
+		exit_code(2, __PRETTY_FUNCTION__, "generic SSL error");
 	}
 	return 1;
+}
+# endif /* USE_OPENSSL */
+
+# ifdef USE_GNUTLS
+static int set_target_with_gnutls(char *domainname, int ignore_ca_fail) {
+	int ret;
+#  ifdef HAVE_GNUTLS_319
+	gnutls_handshake_set_timeout(tls_session, GNUTLS_DEFAULT_HANDSHAKE_TIMEOUT);
+#  endif
+	ret = gnutls_handshake(tls_session);
+	if (ret < 0) {
+		dbg("TLS Handshake FAILED!!!\n");
+		gnutls_perror(ret);
+		exit_code(3, __PRETTY_FUNCTION__, "TLS handshake failed");
+	}
+	else if (verbose > 2) {
+		dbg(" TLS Handshake was completed!\n");
+		gnutls_session_info(tls_session);
+		if (verify_certificate_simple(tls_session, domainname, ignore_ca_fail) != 0) {
+			if (ignore_ca_fail == 1) {
+				if (verbose) {
+					printf("WARN: Ignoring verification failures of the server certificate\n");
+				}
+			} else {
+				if (verbose > 1) {
+					printf("TLS server certificate verification can be ignored with option --tls-ignore-cert-failure.\n");
+				}
+				exit_code(3, __PRETTY_FUNCTION__, "failure during TLS server certificate verification");
+			}
+		}
+		//verify_certificate_chain(tls_session, domainname, cert_chain, cert_chain_length);
+	}
+	return 1;
+}
+# endif /* USE_GNUTLS */
+
+#endif /* WITH_TLS_TANSP */
+
+static sipsak_err set_target_with_tls(char const *domainname, int ignore_ca_fail) {
+# ifdef USE_OPENSSL
+	return set_target_with_openssl(domainname, ignore_ca_fail);
+# else
+#ifdef USE_GNUTLS
+	return set_target_with_gnutls(domainname, ignore_ca_fail);
+#endif /* USE_GNUTLS */
+#endif
+}
+
+static sipsak_err connect_socket(int sock, struct addrinfo *addrs, union sipsak_sockaddr *to_adr) {
+	sipsak_err err = SIPSAK_ERR_SUCCESS;
+	struct addrinfo *cur_addr;
+	for (cur_addr = addrs; cur_addr; cur_addr = cur_addr->ai_next) {
+		if (connect(sock, cur_addr->ai_addr, cur_addr->ai_addrlen) >= 0) {
+			break;
+		}
+	}
+	if (cur_addr == NULL) {
+		err = SIPSAK_ERR_NO_IP;
+	}
+	memcpy(to_adr, cur_addr->ai_addr, cur_addr->ai_addrlen);
+	return err;
+}
+
+static sipsak_err rebind_stream_csock(struct sipsak_con_data *cd) {
+	int errno_backup;
+
+	int optval = 1;
+
+	union sipsak_sockaddr sockname = {0};
+	socklen_t sockname_len = sizeof(sockname);
+
+	if (getsockname(cd->csock, (struct sockaddr *)&sockname, &sockname_len) < 0) {
+		goto err;
+	}
+
+	(void)shutdown(cd->csock, SHUT_RDWR);
+	close(cd->csock);
+
+	cd->csock = socket(sockname.adr.sa_family, SOCK_STREAM, IPPROTO_TCP);
+	if (cd->csock < 0) {
+		goto err;
+	}
+
+	setsockopt(cd->csock, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
+
+	if (bind(cd->csock, (struct sockaddr *)&sockname, sockname_len) < 0) {
+		goto bind_err;
+
+	}
+	return SIPSAK_ERR_SUCCESS;
+
+bind_err:
+	errno_backup = errno;
+	close(cd->csock);
+	cd->csock = -1;
+	errno = errno_backup;
+err:
+	return SIPSAK_ERR_REBIND_TCP;
+}
+
+static sipsak_err set_target_udp(struct sipsak_con_data *cd) {
+	struct sipsak_address *cur_target;
+
+	int errno_backup;
+	sipsak_err err;
+
+	struct addrinfo *res;
+	int addrinfo_res;
+
+
+	memset(&cd->to_adr, 0, sizeof(cd->to_adr));
+
+	cur_target = &cd->addresses[++cd->cur_address];
+
+	addrinfo_res = resolve(cur_target->address, cur_target->port, cd->transport, cd->from_adr.adr.sa_family, 0, &res);
+	if (addrinfo_res != 0) {
+		return translate_gai_err(addrinfo_res);
+	}
+
+	if (cd->csock != -1) {
+		err = connect_socket(cd->csock, res, &cd->to_adr);
+		if (err != SIPSAK_ERR_SUCCESS) {
+			goto err;
+		}
+	} else {
+		memcpy(&cd->to_adr, res->ai_addr, res->ai_addrlen);
+	}
+	freeaddrinfo(res);
+	cd->connected = 1;
+	set_target_dot((struct sockaddr *)&cd->to_adr);
+	cd->rport = get_port((struct sockaddr *)&cd->to_adr);
+	return SIPSAK_ERR_SUCCESS;
+
+err:
+	errno_backup = errno;
+	freeaddrinfo(res);
+	errno = errno_backup;
+	return err;
+}
+
+static sipsak_err set_target_tcp(struct sipsak_con_data *cd) {
+	struct sipsak_address *cur_target;
+
+	int errno_backup;
+	sipsak_err err;
+
+	struct addrinfo *res;
+	int addrinfo_res;
+
+	if (cd->connected) {
+		err = rebind_stream_csock(cd);
+		if (err != SIPSAK_ERR_SUCCESS) {
+			return err;
+		}
+	}
+	cur_target = &cd->addresses[++cd->cur_address];
+	addrinfo_res = resolve(cur_target->address, cur_target->port, cd->transport, cd->from_adr.adr.sa_family, 0, &res);
+	if (addrinfo_res != 0) {
+		return translate_gai_err(addrinfo_res);
+	}
+	err = connect_socket(cd->csock, res, &cd->to_adr);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		goto err;
+	}
+	freeaddrinfo(res);
+	cd->connected = 1;
+	set_target_dot((struct sockaddr *)&cd->to_adr);
+	cd->rport = get_port((struct sockaddr *)&cd->to_adr);
+	return SIPSAK_ERR_SUCCESS;
+
+err:
+	errno_backup = errno;
+	freeaddrinfo(res);
+	errno = errno_backup;
+	return err;
+}
+
+#ifdef WITH_TLS_TRANSP
+static sipsak_err set_target_tls(struct sipsak_con_data *cd, char const *domainname, int ignore_ca_fail) {
+	int res;
+	res = set_target_tcp(cd);
+	if (res < 0) return res;
+
+	return set_target_with_tls(domainname, ignore_ca_fail);
+}
+#endif /* WITH_TLS_TRANSP */
+
+sipsak_err set_target(struct sipsak_con_data *cd, char const *domainname, int ignore_ca_fail) {
+	if (cd->cur_address + 1 >= cd->num_addresses) {
+		return SIPSAK_ERR_EOF;
+	}
+	switch (cd->transport) {
+		case SIP_UDP_TRANSPORT:
+			return set_target_udp(cd);
+		case SIP_TCP_TRANSPORT:
+			return set_target_tcp(cd);
+#ifdef WITH_TLS_TRANSP
+		/*case SIP_TLS_TRANSPORT:
+			return set_target_tls(cd, domainname, ignore_ca_fail); */
+#endif /* WITH_TLS_TRANSP */
+	}
+	return SIPSAK_ERR_SUCCESS;
 }

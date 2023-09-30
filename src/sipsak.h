@@ -157,9 +157,22 @@
 #endif
 #define SIPSAK_HASHHEXLEN 2 * SIPSAK_HASHLEN
 
+#define SIPSAK_ERR_BUFLEN 600
+
 extern int verbose;
 
 enum sipsak_modes { SM_UNDEFINED, SM_USRLOC, SM_USRLOC_INVITE, SM_USRLOC_MESSAGE, SM_INVITE, SM_MESSAGE, SM_FLOOD, SM_TRACE, SM_RANDTRASH };
+
+union sipsak_sockaddr {
+	struct sockaddr adr;
+	struct sockaddr_in in;
+	struct sockaddr_in6 in6;
+};
+
+struct sipsak_address {
+  char *address;
+  in_port_t port;
+};
 
 struct sipsak_options {
   int timing;
@@ -188,9 +201,8 @@ struct sipsak_options {
   int expires_t;
   int rand_rem;
   int timer_t1;
-#ifdef WITH_TLS_TRANSP
+  int ip_type_pref;
   int ignore_ca_fail;
-#endif
   enum sipsak_modes mode;
   char *password;
   char *mes_body;
@@ -204,11 +216,15 @@ struct sipsak_options {
   char *con_dis;
   char *username;
   char *domainname;
+  //char *address;
+  struct sipsak_address *addresses;
+  size_t num_addresses;
   char *auth_username;
   char *cert_file;
   char *ca_file;
-  unsigned int transport;
-  unsigned long address;
+  int transport;
+  //unsigned long address;
+  //union sipsak_sockaddr address;
   regex_t *regex;
 };
 

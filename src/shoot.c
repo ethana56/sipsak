@@ -30,9 +30,9 @@
 #ifdef HAVE_NETINET_IN_H
 # include <netinet/in.h>
 #endif
+#include <errno.h>
 
 #include "shoot.h"
-
 #include "request.h"
 #include "auth.h"
 #include "header_f.h"
@@ -85,60 +85,82 @@ static inline void create_usern(char *target, char *username, int number)
 	}
 }
 
-/* tries to take care of a redirection */
-void handle_3xx(struct sipsak_con_data *con, struct sipsak_msg_data *message,
-    int warning_ext, int outbound_proxy, char *domainname
-#ifdef WITH_TLS_TRANSP
-    , int ignore_ca_fail
-#endif
-    )
+static char *create_msg_domainname(char const *domainname, unsigned int port) {
+	size_t domainname_len;
+	char *result;
+	domainname_len = strlen(domainname);
+	result = str_alloc(domainname_len + 1 + 6);
+	snprintf(result, domainname_len + 6, "%s:%u", domainname, port);
+	return result;
+}
+
+static sipsak_err select_address(struct sipsak_con_data *cd, char const *domainname, int ignore_ca_fail) {
+	sipsak_err err;
+
+	while ((err = set_target(cd, domainname, ignore_ca_fail)) != SIPSAK_ERR_EOF) {
+		if (err == SIPSAK_ERR_SUCCESS) {
+			break;
+		}
+		if (check_errno(err)) {
+			fprintf(stderr, "failed to connect to: %s: %s: %s\n", 
+				sipsak_address_stringify(get_cur_address(cd)), 
+				sipsak_strerror(err), 
+				strerror(errno));
+		} else {
+			fprintf(stderr, "failed to connect to: %s: %s\n", sipsak_address_stringify(get_cur_address(cd)), sipsak_strerror(err));
+		}
+	}
+
+	return err;
+}
+
+/* Tries to take care of a redirection */
+static void handle_3xx(struct sipsak_con_data *con, 
+	struct sipsak_msg_data *message, 
+	int warning_ext,
+	int outbound_proxy,
+	char *domainname,
+	int ignore_ca_fail
+)
 {
+
+	struct sipsak_address *addresses;
+	size_t num_addresses;
+	
 	char *uscheme, *uuser, *uhost, *contact;
+	int uport;
 
 	printf("** received redirect ");
 	if (warning_ext == 1) {
 		printf("from ");
 		warning_extract(received);
 		printf("\n");
-	}
-	else
+	} else {
 		printf("\n");
+	}
+	contact = uri_from_contact(received);
+	if (contact == NULL) {
+		fprintf(stderr, "error: cannot find Contact in this redirect:\n%s\n", received);
+		exit_code(3, __PRETTY_FUNCTION__, "missing Contact header in reply");
+	}
 
-  /* try to find the contact in the redirect */
-  contact = uri_from_contact(received);
-  if (contact==NULL) {
-    fprintf(stderr, "error: cannot find Contact in this "
-      "redirect:\n%s\n", received);
-    exit_code(3, __PRETTY_FUNCTION__, "missing Contact header in reply");
-  }
-  /* correct our request */
-  uri_replace(request, contact);
-  message->cseq_counter = new_transaction(request, response);
-  /* extract the needed information*/
-  con->rport = 0;
-  con->address = 0;
-  parse_uri(contact, &uscheme, &uuser, &uhost, &con->rport);
-  if (!con->rport)
-    con->address = getsrvadr(uhost, &con->rport, &con->transport);
-  if (!con->address)
-    con->address = getaddress(uhost);
-  if (!con->address){
-    fprintf(stderr, "error: cannot determine host "
-        "address from Contact of redirect:"
-        "\n%s\n", received);
-    exit_code(2, __PRETTY_FUNCTION__, "missing host in Contact header");
-  }
-  if (!con->rport) {
-    con->rport = 5060;
-  }
-  free(contact);
-  if (!outbound_proxy)
-    con->connected = set_target(&(con->adr), con->address, con->rport,
-        con->csock, con->connected, con->transport, domainname
-#ifdef WITH_TLS_TRANSP
-        , ignore_ca_fail
-#endif
-        );
+	uri_replace(request, contact);
+
+	message->cseq_counter = new_transaction(request, response);
+
+	if (outbound_proxy) {
+		return;
+	}
+	parse_uri(contact, &uscheme, &uuser, &uhost, &uport);
+	num_addresses = get_addresses(&addresses, uhost, uport, &con->transport); /* TODO: decide if user provided transport should override this*/
+	set_addresses(con, addresses, num_addresses); 
+	if (select_address(con, domainname, ignore_ca_fail) < 0) {
+		fprintf(stderr, "cannot find good ip address in the domain %s\n", uhost);
+		exit_code(2, __PRETTY_FUNCTION__, "cannot find valid domain");
+	}
+	free(message->domainname);
+	message->domainname = create_msg_domainname(get_cur_address(con)->address, get_cur_address(con)->port);
+	free(contact);
 }
 
 /* takes care of replies in the trace route mode */
@@ -809,9 +831,19 @@ void before_sending(struct sipsak_counter *counter, struct sipsak_msg_data *msg_
 	}
 }
 
+static void print_err(char const *msg, sipsak_err err) {
+	if (check_errno(err)) {
+		fprintf(stderr, "%s: %s: %s\n", msg, sipsak_strerror(err), strerror(errno));
+	} else {
+		fprintf(stderr, "%s: %s\n", msg, sipsak_strerror(err));
+	}
+}
+
 /* this is the main function with the loops and modes */
 void shoot(char *buf, int buff_size, struct sipsak_options *options)
 {
+	sipsak_err err;
+
 	struct timespec sleep_ms_s, sleep_rem;
 	int ret, cseqtmp, rand_tmp;
 	char buf2[BUFSIZE], buf3[BUFSIZE], lport_str[LPORT_STR_LEN];
@@ -845,7 +877,7 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 
 	connection.csock = connection.usock = -1;
 	connection.transport = options->transport;
-	connection.address = options->address;
+	set_addresses(&connection, options->addresses, options->num_addresses);
 	connection.symmetric = options->symmetric;
 	connection.lport = options->lport;
 	connection.rport = options->rport;
@@ -882,7 +914,7 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 	msg_data.repl_buff = response;
 	msg_data.username = options->username;
 	msg_data.usern = NULL;
-	msg_data.domainname = options->domainname;
+	//msg_data.domainname = options->domainname;
 	msg_data.contact_uri = options->contact_uri;
 	msg_data.con_dis = options->con_dis;
 	msg_data.from_uri = options->from_uri;
@@ -890,10 +922,26 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 	msg_data.headers = options->headers;
 	msg_data.fqdn = fqdn;
 
-	init_network(&connection, options->local_ip, options->ca_file);
-  if (msg_data.lport == 0) {
+	err = init_network(&connection, options->local_ip, options->ca_file);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		print_err("error initializing sockets", err);
+		exit_code(2, __PRETTY_FUNCTION__, "error initializing network");
+	}
+
+	msg_data.lport = connection.lport;
+
+	err = select_address(&connection, options->domainname, options->ignore_ca_fail);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		fprintf(stderr, "cannot find a good ip address in the domain: %s\n", options->domainname);
+		exit_code(2, __PRETTY_FUNCTION__, "cannot find a good ip address in the domain");
+	}
+
+	msg_data.domainname = create_msg_domainname(options->domainname, connection.rport);
+	
+  /*if (msg_data.lport == 0) {
+	printf("SETTING THE PORT TO 0!!!!!!!\n");
     msg_data.lport = connection.lport;
-  }
+  }*/
 
 	/* determine our hostname */
 	get_fqdn(&fqdn[0], options->numeric, options->hostname);
@@ -1008,14 +1056,6 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 			set_maxforw(request, options->maxforw);
 	}
 
-	connection.connected = set_target(&(connection.adr), connection.address,
-      connection.rport, connection.csock, connection.connected,
-      connection.transport, options->domainname
-#ifdef WITH_TLS_TRANSP
-      , options->ignore_ca_fail
-#endif
-      );
-
 	/* here we go until someone decides to exit */
 	while(1) {
 		before_sending(&counters, &msg_data, options->mode, &connection);
@@ -1095,24 +1135,18 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 					continue;
 				} /* if auth...*/
 				/* lets see if received a redirect */
-				if (options->redirects == 1 &&
-            regexec(&(regexps.redexp), received, 0, 0, 0) == REG_NOERROR) {
-					handle_3xx(&connection, &msg_data, options->warning_ext,
-              options->outbound_proxy, options->domainname
-#ifdef WITH_TLS_TRANSP
-                     , options->ignore_ca_fail
-#endif
-                     );
+				if (options->redirects == 1 && regexec(&(regexps.redexp), received, 0, 0, 0) == REG_NOERROR) {
+					handle_3xx(&connection, &msg_data, options->warning_ext, options->outbound_proxy, options->domainname, options->ignore_ca_fail);
 				} /* if redircts... */
 				else if (options->mode == SM_TRACE) {
-					trace_reply(&regexps, &counters, &timers, &connection, &delays,
-              &msg_data);
+					trace_reply(&regexps, &counters, &timers, &connection, &delays, &msg_data);
 				} /* if trace ... */
 				else if (options->mode == SM_USRLOC ||
-                 options->mode == SM_USRLOC_INVITE ||
-                 options->mode == SM_USRLOC_MESSAGE ||
-                 options->mode == SM_INVITE ||
-                 options->mode == SM_MESSAGE) {
+                 	options->mode == SM_USRLOC_INVITE ||
+                 	options->mode == SM_USRLOC_MESSAGE ||
+                 	options->mode == SM_INVITE ||
+                 	options->mode == SM_MESSAGE) {
+
 					handle_usrloc(&regexps, &counters,
                         options->rand_rem, msg_data.username,
                         options->nagios_warn, &timers, msg_data.mes_body,
@@ -1122,8 +1156,7 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 					handle_randtrash(options->warning_ext, &counters, &msg_data, &regexps);
 				}
 				else {
-					handle_default(&regexps, &counters, &timers, &connection, &delays,
-              &msg_data);
+					handle_default(&regexps, &counters, &timers, &connection, &delays, &msg_data);
 				} /* redirect, auth, and modes */
 			} /* ret > 0 */
 			else if (ret == -1) { // we did not got anything back, send again
