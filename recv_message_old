@@ -1,0 +1,178 @@
+int recv_message(char *buf, int size, int inv_trans,
+			struct sipsak_delay *sd, struct sipsak_sr_time *srt,
+			struct sipsak_counter *count, struct sipsak_con_data *cd,
+			struct sipsak_regexp *reg, enum sipsak_modes mode, int cseq_counter,
+      char *request, char *response) {
+	int ret = 0;
+	int sock = 0;
+	double tmp_delay;
+#ifdef HAVE_INET_NTOP
+	struct sockaddr_in peer_adr;
+	socklen_t psize = sizeof(peer_adr);
+#endif
+#ifdef RAW_SUPPORT
+	struct sockaddr_in faddr;
+	struct ip 		*r_ip_hdr, *s_ip_hdr;
+	struct icmp 	*icmp_hdr;
+	struct udphdr 	*udp_hdr;
+	size_t r_ip_len, s_ip_len, icmp_len;
+	int srcport, dstport;
+	unsigned int flen;
+#endif
+
+	if (cd->buf_tmp) {
+		buf = cd->buf_tmp;
+		size = size - cd->buf_tmp_size;
+	}
+	sock = check_for_message(buf, size, cd, srt, count, sd, mode, cseq_counter,
+      request, response, inv_trans);
+	if (sock <= 1) {
+		return -1;
+	}
+#ifdef RAW_SUPPORT
+	if (sock != rawsock) {
+#else
+	else {
+#endif
+		check_socket_error(sock, buf, size, mode, request);
+#ifdef WITH_TLS_TRANSP
+		if (cd->transport == SIP_TLS_TRANSPORT) {
+# ifdef USE_GNUTLS
+			ret = gnutls_record_recv(tls_session, buf, size);
+# else /* USE_GNUTLS */
+#  ifdef USE_OPENSSL
+#  endif /* USE_OPENSSL */
+# endif /* USE_GNUTLS */
+		}
+		else {
+#endif /* TLS_TRANSP */
+			ret = recvfrom(sock, buf, size, 0, NULL, 0);
+#ifdef WITH_TLS_TRANSP
+		}
+#endif /* TLS_TRANSP */
+	}
+#ifdef RAW_SUPPORT
+	else {
+		/* lets check if the ICMP message matches with our 
+		   sent packet */
+		flen = sizeof(faddr);
+		memset(&faddr, 0, sizeof(struct sockaddr));
+		ret = recvfrom(rawsock, buf, size, 0, (struct sockaddr *)&faddr, &flen);
+		if (ret == -1) {
+			perror("error while trying to read from icmp raw socket");
+			exit_code(2, __PRETTY_FUNCTION__, "failed to read from ICMP RAW socket");
+		}
+		r_ip_hdr = (struct ip *) buf;
+		r_ip_len = r_ip_hdr->ip_hl << 2;
+
+		icmp_hdr = (struct icmp *) (buf + r_ip_len);
+		icmp_len = ret - r_ip_len;
+
+		if (icmp_len < 8) {
+			if (verbose > 1)
+				printf(": ignoring (ICMP header length below 8 bytes)\n");
+			return -2;
+		}
+		else if (icmp_len < 36) {
+			if (verbose > 1)
+				printf(": ignoring (ICMP message too short to contain IP and UDP header)\n");
+			return -2;
+		}
+		s_ip_hdr = (struct ip *) ((char *)icmp_hdr + 8);
+		s_ip_len = s_ip_hdr->ip_hl << 2;
+		if (s_ip_hdr->ip_p == IPPROTO_UDP) {
+			udp_hdr = (struct udphdr *) ((char *)s_ip_hdr + s_ip_len);
+			srcport = ntohs(udp_hdr->uh_sport);
+			dstport = ntohs(udp_hdr->uh_dport);
+			dbg("\nlport: %i, rport: %i\n", cd->lport, cd->rport);
+			if ((srcport == cd->lport) && (dstport == cd->rport)) {
+				printf(" (type: %u, code: %u)", icmp_hdr->icmp_type, icmp_hdr->icmp_code);
+#ifdef HAVE_INET_NTOP
+				if (inet_ntop(AF_INET, &faddr.sin_addr, &source_dot[0], INET_ADDRSTRLEN) != NULL)
+					printf(": from %s\n", source_dot);
+				else
+					printf("\n");
+#else
+				printf("\n");
+#endif // HAVE_INET_NTOP
+				log_message(request);
+				exit_code(3, __PRETTY_FUNCTION__, "received ICMP error");
+			}
+			else {
+				if (verbose > 2)
+					printf(": ignoring (ICMP message does not match used ports)\n");
+				return -2;
+			}
+		}
+		else {
+			if (verbose > 1)
+				printf(": ignoring (ICMP data is not a UDP packet)\n");
+			return -2;
+		}
+	}
+#endif // RAW_SUPPORT
+	if (ret > 0) {
+		*(buf+ ret) = '\0';
+		if (cd->transport != SIP_UDP_TRANSPORT) {
+			if (verbose > 0)
+				printf("\nchecking message for completeness...\n");
+			if (complete_mes(buf, ret) == 1) {
+				cd->buf_tmp = NULL;
+				ret += cd->buf_tmp_size;
+				cd->buf_tmp_size = 0;
+			}
+			else {
+				if (cd->buf_tmp) {
+					cd->buf_tmp += ret;
+					cd->buf_tmp_size += ret;
+				}
+				else {
+					cd->buf_tmp = buf + ret;
+					cd->buf_tmp_size = ret;
+				}
+				cd->dontsend = 1;
+				ret = -1;
+			}
+		}
+		/* store the biggest delay if one occurred */
+		if (srt->delaytime.tv_sec != 0) {
+			tmp_delay = deltaT(&(srt->delaytime), &(srt->recvtime));
+			if (tmp_delay > sd->big_delay)
+				sd->big_delay = tmp_delay;
+			if ((sd->small_delay == 0) || (tmp_delay < sd->small_delay))
+				sd->small_delay = tmp_delay;
+			srt->delaytime.tv_sec = 0;
+			srt->delaytime.tv_usec = 0;
+		}
+		if (srt->timing > 0) {
+			tmp_delay = deltaT(&(srt->sendtime), &(srt->recvtime));
+			if (tmp_delay > sd->big_delay) {
+				sd->big_delay = tmp_delay;
+			}
+			if ((sd->small_delay == 0) || (tmp_delay < sd->small_delay)) {
+				sd->small_delay = tmp_delay;
+			}
+			sd->all_delay += tmp_delay;
+		}
+#ifdef HAVE_INET_NTOP
+		if ((verbose > 2) && (getpeername(sock, (struct sockaddr *)&peer_adr, &psize) == 0) && (inet_ntop(peer_adr.sin_family, &peer_adr.sin_addr, &source_dot[0], INET_ADDRSTRLEN) != NULL)) {
+			printf("\nreceived from: %s:%s:%i\n", transport_str, 
+						source_dot, ntohs(peer_adr.sin_port));
+		}
+		else if ((verbose > 1) && (mode != SM_TRACE && mode != SM_USRLOC))
+			printf(":\n");
+#else
+		if (mode != SM_TRACE && mode != SM_USRLOC)
+			printf(":\n");
+#endif // HAVE_INET_NTOP
+		if (!inv_trans && ret > 0 && (regexec(&(reg->proexp), buf, 0, 0, 0) != REG_NOERROR)) {
+			sd->retryAfter = srt->timer_t1;
+		}
+	}
+	else {
+		check_socket_error(sock, buf, size, mode, request);
+		printf("\nnothing received, select returned error\n");
+		exit_code(2, __PRETTY_FUNCTION__, "nothing received, select returned error");
+	}
+	return ret;
+}

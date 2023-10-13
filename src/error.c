@@ -47,10 +47,14 @@ char const *sipsak_strerror(sipsak_err err) {
             return "could not find suitable ip address";
         case SIPSAK_ERR_MEM:
             return "memory allocation failure";
+        case SIPSAK_ERR_SEND:
+            return "send failure";
         case SIPSAK_ERR_EOF:
             return "EOF";
         case SIPSAK_ERR_SYS:
             return "system error";
+        case SIPSAK_ERR_RAWBUF_SIZE:
+            return "rawbuf too small";
         default:
             return "unknown error";
     }
@@ -61,6 +65,7 @@ int check_errno(sipsak_err err) {
         case SIPSAK_ERR_SYS:
         case SIPSAK_ERR_REBIND_TCP:
         case SIPSAK_ERR_NO_IP:
+        case SIPSAK_ERR_SEND:
             return 1;
         default:
             return 0;

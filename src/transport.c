@@ -56,6 +56,8 @@
 #  define __FAVOR_BSD
 #  include <netinet/udp.h>
 # endif
+
+#include <netinet/icmp6.h>
 #endif /* RAW_SUPPORT */
 
 #ifdef WITH_TLS_TRANSP
@@ -94,10 +96,13 @@
 # endif
 #endif /* WITH_TLS_TRANSP */
 
+#define RAW_HEADER_MAXLEN 512
+
 #include "exit_code.h"
 #include "helper.h"
 #include "header_f.h"
 #include "error.h"
+#include "raw_packet.h"
 
 char *transport_str;
 char target_dot[INET6_ADDRSTRLEN], source_dot[INET6_ADDRSTRLEN];
@@ -614,8 +619,8 @@ static int resolve(char const *address, unsigned short port, int transport, int 
 			break;
 	}
 
-	/*hints.ai_family = family;*/
-	hints.ai_family = PF_INET;
+	hints.ai_family = family;
+	//hints.ai_family = PF_INET;
 	hints.ai_flags = binding ? AI_PASSIVE : 0;
 
 	(void)snprintf(port_str, sizeof(port_str), "%hu", port);
@@ -623,7 +628,7 @@ static int resolve(char const *address, unsigned short port, int transport, int 
 	return addrinfo_res;
 }
 
-static sipsak_err get_bound_socket(struct addrinfo *addrs, int *sock, union sipsak_sockaddr *sock_addr) {
+static sipsak_err get_bound_socket(struct addrinfo *addrs, int *sock, union sipsak_sockaddr *sock_addr, socklen_t *addr_len) {
 	struct addrinfo *cur_addr;
 	int errno_backup;
 
@@ -633,7 +638,12 @@ static sipsak_err get_bound_socket(struct addrinfo *addrs, int *sock, union sips
 			continue;
 		}
 		if (bind(*sock, cur_addr->ai_addr, cur_addr->ai_addrlen) >= 0) {
-			memcpy(sock_addr, cur_addr->ai_addr, cur_addr->ai_addrlen);
+			if (sock_addr != NULL) {
+				memcpy(sock_addr, cur_addr->ai_addr, cur_addr->ai_addrlen);
+			}
+			if (addr_len != NULL) {
+				*addr_len = cur_addr->ai_addrlen;
+			}
 			break;
 		}
 		errno_backup = errno;
@@ -681,11 +691,12 @@ static sipsak_err init_network_udp_non_symmetric(struct sipsak_con_data *cd, cha
 		return translate_gai_err(addrinfo_res);
 	}
 
-	err = get_bound_socket(res, &cd->usock, &listen_adr);
+	err = get_bound_socket(res, &cd->usock, &listen_adr, &cd->from_adr_len);
 	if (err != SIPSAK_ERR_SUCCESS) {
 		goto err;
 	}
 	freeaddrinfo(res);
+	get_socket_address(cd->usock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
 
 #ifdef RAW_SUPPORT
  	created_raw_sock = create_raw_sock(listen_adr.adr.sa_family);
@@ -697,14 +708,12 @@ static sipsak_err init_network_udp_non_symmetric(struct sipsak_con_data *cd, cha
 		if (addrinfo_res != 0) {
 			return translate_gai_err(addrinfo_res);
 		}
-		err = get_bound_socket(res, &cd->csock, &listen_adr);
+		err = get_bound_socket(res, &cd->csock, NULL, NULL);
 		if (err != SIPSAK_ERR_SUCCESS) {
 			goto err;
 		}
 		freeaddrinfo(res);
 	}
-
-	get_socket_address(cd->usock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
 	cd->lport = get_port((struct sockaddr *)&cd->from_adr);
 	return SIPSAK_ERR_SUCCESS;
 
@@ -730,17 +739,16 @@ static sipsak_err init_network_udp_symmetric(struct sipsak_con_data *cd, char co
 		return translate_gai_err(addrinfo_res);
 	}
 
-	err = get_bound_socket(res, &cd->csock, &listen_adr);
+	err = get_bound_socket(res, &cd->csock, &listen_adr, &cd->from_adr_len);
 	if (err != SIPSAK_ERR_SUCCESS) {
 		goto err;
 	}
 	freeaddrinfo(res);
+	get_socket_address(cd->csock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
 
 #ifdef RAW_SUPPORT
 	(void)create_raw_sock(listen_adr.adr.sa_family);
 #endif /* RAW_SUPPORT */
-
-	get_socket_address(cd->csock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
 	cd->lport = get_port((struct sockaddr *)&cd->from_adr);
 
 	return SIPSAK_ERR_SUCCESS;
@@ -777,7 +785,7 @@ static sipsak_err init_network_tcp(struct sipsak_con_data *cd, char const *local
 	if (addrinfo_res != 0) {
 		return translate_gai_err(addrinfo_res);
 	}
-	err = get_bound_socket(res, &cd->csock, &listen_adr);
+	err = get_bound_socket(res, &cd->csock, &listen_adr, &cd->from_adr_len);
 	if (err != SIPSAK_ERR_SUCCESS) {
 		goto err;
 	}
@@ -897,57 +905,100 @@ void shutdown_network() {
 # endif /* USE_GNUTLS */
 }
 
-void send_message(char* mes, struct sipsak_con_data *cd,
-			struct sipsak_counter *sc, struct sipsak_sr_time *srt) {
-	struct timezone tz;
-	int ret = -1;
-
-	if (cd->dontsend == 0) {
-		if (verbose > 2) {
-			printf("\nrequest:\n%s", mes);
-		}
-		/* lets fire the request to the server and store when we did */
-		if (cd->csock == -1) {
-			dbg("\nusing un-connected socket for sending\n");
-			ret = sendto(cd->usock, mes, strlen(mes), 0, (struct sockaddr *) &(cd->to_adr), sizeof(struct sockaddr));
-			//ret = sendto(cd->usock, mes, strlen(mes), 0, (struct sockaddr *) &(cd->from_adr), sizeof(struct sockaddr_in));
-		}
-		else {
-			dbg("\nusing connected socket for sending\n");
 #ifdef WITH_TLS_TRANSP
-			if (cd->transport == SIP_TLS_TRANSPORT) {
-# ifdef USE_GNUTLS
-				ret = gnutls_record_send(tls_session, mes, strlen(mes));
-# else /* USE_GNUTLS */
-#  ifdef USE_OPENSSL
-#  endif /* USE_OPENSSL */
-# endif /* USE_GNUTLS */
-			}
-			else {
-#endif /* TLS_TRANSP */
-				ret = send(cd->csock, mes, strlen(mes), 0);
-#ifdef WITH_TLS_TRANSP
-			}
-#endif /* TLS_TRANSP */
-		}
-		(void)gettimeofday(&(srt->sendtime), &tz);
-		if (ret==-1) {
-			if (verbose)
-				printf("\n");
-			perror("send failure");
-			exit_code(2, __PRETTY_FUNCTION__, "send failure");
-		}
-#ifdef HAVE_INET_NTOP
-		if (verbose > 2) {
-			printf("\nsend to: %s:%s:%i\n", transport_str, target_dot, cd->rport);
-    }
-#endif
-		sc->send_counter++;
-	}
-	else {
-		cd->dontsend = 0;
-	}
+static sipsak_err send_message_tls(char *mes, struct sipsak_con_data *cd) {
+	return SIPSAK_ERR_UNKNOWN;
 }
+#endif /* TLS_TRANSP */
+
+static sipsak_err send_message_plain(char *mes, struct sipsak_con_data *cd) {
+	if (cd->csock == -1) {
+		dbg("\nusing un-connected socket for sending\n");
+		if (sendto(cd->usock, mes, strlen(mes), 0, (struct sockaddr *)&cd->to_adr, cd->to_adr_len) < 0) {
+			return SIPSAK_ERR_SEND;
+		}
+	} else {
+		dbg("\nusing connected socket for sending\n");
+		if (send(cd->csock, mes, strlen(mes), 0) < 0) {
+			return SIPSAK_ERR_SEND;
+		}
+	}
+	return SIPSAK_ERR_SUCCESS;
+}
+
+sipsak_err send_message(char *mes, struct sipsak_con_data *cd, struct sipsak_counter *sc, struct sipsak_sr_time *srt) {
+	sipsak_err err;
+
+	switch (cd->transport) {
+#ifdef WITH_TLS_TRANSP
+		case SIP_TLS_TRANSPORT:
+			err = send_message_tls(mes, cd);
+			break;
+#endif
+		case SIP_TCP_TRANSPORT:
+		case SIP_UDP_TRANSPORT:
+			err = send_message_plain(mes, cd);
+			break;
+	}
+	if (err != SIPSAK_ERR_SUCCESS) {
+		return err;
+	}
+
+	(void)gettimeofday(&srt->sendtime, NULL);
+	sc->send_counter++;
+	return SIPSAK_ERR_SUCCESS;
+}
+//void _send_message(char* mes, struct sipsak_con_data *cd,
+//			struct sipsak_counter *sc, struct sipsak_sr_time *srt) {
+//	struct timezone tz;
+//	int ret = -1;
+//
+//	if (cd->dontsend == 0) {
+//		if (verbose > 2) {
+//			printf("\nrequest:\n%s", mes);
+//		}
+//		/* lets fire the request to the server and store when we did */
+//		if (cd->csock == -1) {
+//			dbg("\nusing un-connected socket for sending\n");
+//			ret = sendto(cd->usock, mes, strlen(mes), 0, (struct sockaddr *) &(cd->to_adr), sizeof(struct sockaddr));
+//			//ret = sendto(cd->usock, mes, strlen(mes), 0, (struct sockaddr *) &(cd->from_adr), sizeof(struct sockaddr_in));
+//		}
+//		else {
+//			dbg("\nusing connected socket for sending\n");
+//#ifdef WITH_TLS_TRANSP
+//			if (cd->transport == SIP_TLS_TRANSPORT) {
+//# ifdef USE_GNUTLS
+//				ret = gnutls_record_send(tls_session, mes, strlen(mes));
+//# else /* USE_GNUTLS */
+//#  ifdef USE_OPENSSL
+//#  endif /* USE_OPENSSL */
+//# endif /* USE_GNUTLS */
+//			}
+//			else {
+//#endif /* TLS_TRANSP */
+//				ret = send(cd->csock, mes, strlen(mes), 0);
+//#ifdef WITH_TLS_TRANSP
+//			}
+//#endif /* TLS_TRANSP */
+//		}
+//		(void)gettimeofday(&(srt->sendtime), &tz);
+//		if (ret==-1) {
+//			if (verbose)
+//				printf("\n");
+//			perror("send failure");
+//			exit_code(2, __PRETTY_FUNCTION__, "send failure");
+//		}
+//#ifdef HAVE_INET_NTOP
+//		if (verbose > 2) {
+//			printf("\nsend to: %s:%s:%i\n", transport_str, target_dot, cd->rport);
+  //  }
+//#endif
+//		sc->send_counter++;
+//	}
+//	else {
+//		cd->dontsend = 0;
+//	}
+//}
 
 void check_socket_error(int socket, char *buffer, int size,
     enum sipsak_modes mode, char *request) {
@@ -1102,12 +1153,12 @@ int check_for_message(char *recv, int size, struct sipsak_con_data *cd,
 		}
 		/* no timeout, no error ... something has happened :-) */
 		if ((mode == SM_FLOOD || mode == SM_UNDEFINED) && (verbose > 1))
-			printf ("\nmessage received");
+			printf ("\nmessage received\n");
 	}
 #ifdef RAW_SUPPORT
 	else if ((rawsock != -1) && FD_ISSET(rawsock, &fd)) {
 		if (verbose > 1)
-			printf("\nreceived ICMP message");
+			//printf("\nreceived ICMP message");
 		ret = rawsock;
 	}
 #endif
@@ -1166,148 +1217,219 @@ int complete_mes(char *mes, int size) {
 	}
 }
 
-int recv_message(char *buf, int size, int inv_trans,
-			struct sipsak_delay *sd, struct sipsak_sr_time *srt,
-			struct sipsak_counter *count, struct sipsak_con_data *cd,
-			struct sipsak_regexp *reg, enum sipsak_modes mode, int cseq_counter,
-      char *request, char *response) {
-	int ret = 0;
+static sipsak_err icmp6_extract(unsigned char const *buf, size_t buf_len, struct sipsak_con_data *cd) {
+	unsigned int icmp_type, icmp_code;
+	unsigned int udp_dst_p, udp_src_p;
+	unsigned int protocol, payload_length;
+	size_t internal_ip_buf_len, internal_ip_header_len;
+	size_t udp_buf_len;
+	unsigned char const *internal_ip_buf, *udp_buf;
+
+	if (icmp6_type(buf, buf_len, &icmp_type) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	switch (icmp_type) {
+		case ICMP6_DESTINATION_UNREACHABLE:
+		case ICMP6_PACKET_TOO_BIG:
+		case ICMP6_TIME_EXCEEDED:
+		case ICMP6_PARAMETER_PROBLEM:
+			break;
+		default:
+			return SIPSAK_ERR_ICMP_UNOWNED;
+	}
+
+	if (icmp6_code(buf, buf_len, &icmp_code) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	if (icmp6_ip_header(buf, buf_len, &internal_ip_buf_len, &internal_ip_buf) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	if (ipv6_next_header(internal_ip_buf, internal_ip_buf_len, &protocol) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	if (protocol != IPPROTO_UDP) {
+		return SIPSAK_ERR_ICMP_UNOWNED_PROTO;
+	}
+
+	if (ipv6_next_payload(internal_ip_buf, internal_ip_buf_len, &udp_buf_len, &udp_buf) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	if (udp_dst_port(udp_buf, udp_buf_len, &udp_dst_p) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+	if (udp_src_port(udp_buf, udp_buf_len, &udp_src_p) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	if (udp_src_p != cd->lport || udp_dst_p != cd->rport) {
+		return SIPSAK_ERR_ICMP_UNOWNED_PORT;
+	}
+
+	cd->last_icmp_code = icmp_code;
+	cd->last_icmp_type = icmp_type;
+
+	return SIPSAK_ERR_ICMP6;
+
+}
+
+static sipsak_err icmp4_extract(unsigned char const *buf, size_t buf_len, struct sipsak_con_data *cd) {
+	size_t internal_ip_buf_len;
+	unsigned int protocol, ihl;
+	unsigned int icmp_type, icmp_code;
+	unsigned int ip_header_len, icmp_buf_len, internal_ip_header_len, udp_buf_len;
+	unsigned int  udp_src_p, udp_dst_p;
+	unsigned char const *icmp_buf, *internal_ip_buf, *udp_buf;
+
+	if (ipv4_ihl(buf, buf_len, &ihl) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+	
+	ip_header_len = ihl*4;
+	if (buf_len < ip_header_len) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	icmp_buf_len = buf_len - ip_header_len;
+	icmp_buf = buf + ip_header_len;
+
+	if (icmp4_type(icmp_buf, icmp_buf_len, &icmp_type) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	switch (icmp_type) {
+		case ICMP4_DESTINATION_UNREACHABLE:
+		case ICMP4_REDIRECT:
+		case ICMP4_TIME_EXCEEDED:
+		case ICMP4_PARAMETER_PROBLEM:
+			break;
+		default:
+			return SIPSAK_ERR_ICMP_UNOWNED_TYPE;
+	}
+
+	if (icmp4_code(icmp_buf, icmp_buf_len, &icmp_code) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	if (icmp4_ip_header(icmp_buf, icmp_buf_len, &internal_ip_buf_len, &internal_ip_buf) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	if (ipv4_protocol(internal_ip_buf, internal_ip_buf_len, &protocol) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+	if (protocol != IPPROTO_UDP) {
+		return SIPSAK_ERR_ICMP_UNOWNED_PROTO;
+	}
+
+	if (ipv4_ihl(internal_ip_buf, internal_ip_buf_len, &ihl) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	internal_ip_header_len = ihl*4;
+
+	if (internal_ip_buf_len < internal_ip_header_len) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	udp_buf_len = internal_ip_buf_len - internal_ip_header_len;
+	udp_buf = internal_ip_buf + internal_ip_header_len;
+
+	if (udp_src_port(udp_buf, udp_buf_len, &udp_src_p) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	if (udp_dst_port(udp_buf, udp_buf_len, &udp_dst_p) < 0) {
+		return SIPSAK_ERR_RAWBUF_SIZE;
+	}
+
+	if (udp_src_p != cd->lport || udp_dst_p != cd->rport) {
+		return SIPSAK_ERR_ICMP_UNOWNED_PORT;
+	}
+
+	cd->last_icmp_type = icmp_type;
+	cd->last_icmp_code = icmp_code;
+
+	return SIPSAK_ERR_ICMP4;
+}
+
+void get_last_icmp(struct sipsak_con_data *cd, unsigned int *icmp_type, unsigned int *icmp_code) {
+	*icmp_type = (unsigned int)cd->last_icmp_type;
+	*icmp_code = (unsigned int)cd->last_icmp_code;
+}
+
+static sipsak_err handle_raw_socket(struct sipsak_con_data *cd) {
+	union sipsak_sockaddr fadr;
+	socklen_t flen = sizeof(fadr);
+	ssize_t recv_ret;
+
+	unsigned char buf[RAW_HEADER_MAXLEN];
+
+	recv_ret = recvfrom(rawsock, buf, sizeof(buf), 0, (struct sockaddr *)&fadr, &flen);
+	if (recv_ret < 0) {
+		return SIPSAK_ERR_SYS;
+	}
+
+	switch (cd->to_adr.adr.sa_family) {
+		case AF_INET:
+			return icmp4_extract(buf, recv_ret, cd);
+		case AF_INET6:
+			return icmp6_extract(buf, recv_ret, cd);
+		default:
+			return SIPSAK_ERR_UNKNOWN;
+	}
+}
+
+sipsak_err recv_message(char *buf, size_t buf_size, int inv_trans, struct sipsak_delay *sd, struct sipsak_sr_time *srt, struct sipsak_counter *count, struct sipsak_con_data *cd, struct sipsak_regexp *reg, enum sipsak_modes mode, int cseq_counter, char *request, char *response, size_t *num_read) {
 	int sock = 0;
+	int recv_ret;
 	double tmp_delay;
-#ifdef HAVE_INET_NTOP
-	struct sockaddr_in peer_adr;
-	socklen_t psize = sizeof(peer_adr);
-#endif
-#ifdef RAW_SUPPORT
-	struct sockaddr_in faddr;
-	struct ip 		*r_ip_hdr, *s_ip_hdr;
-	struct icmp 	*icmp_hdr;
-	struct udphdr 	*udp_hdr;
-	size_t r_ip_len, s_ip_len, icmp_len;
-	int srcport, dstport;
-	unsigned int flen;
-#endif
+	union sipsak_sockaddr fadr;
 
-	if (cd->buf_tmp) {
-		buf = cd->buf_tmp;
-		size = size - cd->buf_tmp_size;
-	}
-	sock = check_for_message(buf, size, cd, srt, count, sd, mode, cseq_counter,
-      request, response, inv_trans);
+	*num_read = 0;
+
+	sock = check_for_message(buf, buf_size, cd, srt, count, sd, mode, cseq_counter, request, response, inv_trans);
 	if (sock <= 1) {
-		return -1;
+		return SIPSAK_ERR_AGAIN;
 	}
+
 #ifdef RAW_SUPPORT
-	if (sock != rawsock) {
-#else
-	else {
+
+	if (sock == rawsock) {
+		return handle_raw_socket(cd);
+	}
+
 #endif
-		check_socket_error(sock, buf, size, mode, request);
-#ifdef WITH_TLS_TRANSP
-		if (cd->transport == SIP_TLS_TRANSPORT) {
-# ifdef USE_GNUTLS
-			ret = gnutls_record_recv(tls_session, buf, size);
-# else /* USE_GNUTLS */
-#  ifdef USE_OPENSSL
-#  endif /* USE_OPENSSL */
-# endif /* USE_GNUTLS */
-		}
-		else {
-#endif /* TLS_TRANSP */
-			ret = recvfrom(sock, buf, size, 0, NULL, 0);
-#ifdef WITH_TLS_TRANSP
-		}
-#endif /* TLS_TRANSP */
-	}
-#ifdef RAW_SUPPORT
-	else {
-		/* lets check if the ICMP message matches with our 
-		   sent packet */
-		flen = sizeof(faddr);
-		memset(&faddr, 0, sizeof(struct sockaddr));
-		ret = recvfrom(rawsock, buf, size, 0, (struct sockaddr *)&faddr, &flen);
-		if (ret == -1) {
-			perror("error while trying to read from icmp raw socket");
-			exit_code(2, __PRETTY_FUNCTION__, "failed to read from ICMP RAW socket");
-		}
-		r_ip_hdr = (struct ip *) buf;
-		r_ip_len = r_ip_hdr->ip_hl << 2;
 
-		icmp_hdr = (struct icmp *) (buf + r_ip_len);
-		icmp_len = ret - r_ip_len;
-
-		if (icmp_len < 8) {
-			if (verbose > 1)
-				printf(": ignoring (ICMP header length below 8 bytes)\n");
-			return -2;
-		}
-		else if (icmp_len < 36) {
-			if (verbose > 1)
-				printf(": ignoring (ICMP message too short to contain IP and UDP header)\n");
-			return -2;
-		}
-		s_ip_hdr = (struct ip *) ((char *)icmp_hdr + 8);
-		s_ip_len = s_ip_hdr->ip_hl << 2;
-		if (s_ip_hdr->ip_p == IPPROTO_UDP) {
-			udp_hdr = (struct udphdr *) ((char *)s_ip_hdr + s_ip_len);
-			srcport = ntohs(udp_hdr->uh_sport);
-			dstport = ntohs(udp_hdr->uh_dport);
-			dbg("\nlport: %i, rport: %i\n", cd->lport, cd->rport);
-			if ((srcport == cd->lport) && (dstport == cd->rport)) {
-				printf(" (type: %u, code: %u)", icmp_hdr->icmp_type, icmp_hdr->icmp_code);
-#ifdef HAVE_INET_NTOP
-				if (inet_ntop(AF_INET, &faddr.sin_addr, &source_dot[0], INET_ADDRSTRLEN) != NULL)
-					printf(": from %s\n", source_dot);
-				else
-					printf("\n");
-#else
-				printf("\n");
-#endif // HAVE_INET_NTOP
-				log_message(request);
-				exit_code(3, __PRETTY_FUNCTION__, "received ICMP error");
-			}
-			else {
-				if (verbose > 2)
-					printf(": ignoring (ICMP message does not match used ports)\n");
-				return -2;
-			}
-		}
-		else {
-			if (verbose > 1)
-				printf(": ignoring (ICMP data is not a UDP packet)\n");
-			return -2;
-		}
+	switch (cd->transport) {
+#ifdef WITH_TLS_TRANSP
+		case SIP_TLS_TRANSPORT:
+			abort();
+#endif
+		case SIP_TCP_TRANSPORT:
+		case SIP_UDP_TRANSPORT:
+			recv_ret = recvfrom(sock, buf, buf_size, 0, NULL, 0);
+			break;
 	}
-#endif // RAW_SUPPORT
-	if (ret > 0) {
-		*(buf+ ret) = '\0';
-		if (cd->transport != SIP_UDP_TRANSPORT) {
-			if (verbose > 0)
-				printf("\nchecking message for completeness...\n");
-			if (complete_mes(buf, ret) == 1) {
-				cd->buf_tmp = NULL;
-				ret += cd->buf_tmp_size;
-				cd->buf_tmp_size = 0;
-			}
-			else {
-				if (cd->buf_tmp) {
-					cd->buf_tmp += ret;
-					cd->buf_tmp_size += ret;
-				}
-				else {
-					cd->buf_tmp = buf + ret;
-					cd->buf_tmp_size = ret;
-				}
-				cd->dontsend = 1;
-				ret = -1;
-			}
-		}
-		/* store the biggest delay if one occurred */
-		if (srt->delaytime.tv_sec != 0) {
-			tmp_delay = deltaT(&(srt->delaytime), &(srt->recvtime));
-			if (tmp_delay > sd->big_delay)
-				sd->big_delay = tmp_delay;
-			if ((sd->small_delay == 0) || (tmp_delay < sd->small_delay))
+
+	if (recv_ret < 0) {
+		return SIPSAK_ERR_SYS;
+	}
+
+	buf[recv_ret] = '\0';
+
+	*num_read = recv_ret;
+
+	/* store the biggest delay if one occurred */
+	if (srt->delaytime.tv_sec != 0) {
+		tmp_delay = deltaT(&(srt->delaytime), &(srt->recvtime));
+		if (tmp_delay > sd->big_delay)
+			sd->big_delay = tmp_delay;
+		if ((sd->small_delay == 0) || (tmp_delay < sd->small_delay))
 				sd->small_delay = tmp_delay;
 			srt->delaytime.tv_sec = 0;
 			srt->delaytime.tv_usec = 0;
@@ -1322,40 +1444,21 @@ int recv_message(char *buf, int size, int inv_trans,
 			}
 			sd->all_delay += tmp_delay;
 		}
-#ifdef HAVE_INET_NTOP
-		if ((verbose > 2) && (getpeername(sock, (struct sockaddr *)&peer_adr, &psize) == 0) && (inet_ntop(peer_adr.sin_family, &peer_adr.sin_addr, &source_dot[0], INET_ADDRSTRLEN) != NULL)) {
-			printf("\nreceived from: %s:%s:%i\n", transport_str, 
-						source_dot, ntohs(peer_adr.sin_port));
-		}
-		else if ((verbose > 1) && (mode != SM_TRACE && mode != SM_USRLOC))
-			printf(":\n");
-#else
-		if (mode != SM_TRACE && mode != SM_USRLOC)
-			printf(":\n");
-#endif // HAVE_INET_NTOP
-		if (!inv_trans && ret > 0 && (regexec(&(reg->proexp), buf, 0, 0, 0) != REG_NOERROR)) {
-			sd->retryAfter = srt->timer_t1;
+
+	if (cd->transport != SIP_UDP_TRANSPORT) {
+		if (!complete_mes(buf, recv_ret)) {
+			return SIPSAK_ERR_AGAIN;
 		}
 	}
-	else {
-		check_socket_error(sock, buf, size, mode, request);
-		printf("\nnothing received, select returned error\n");
-		exit_code(2, __PRETTY_FUNCTION__, "nothing received, select returned error");
-	}
-	return ret;
+	return SIPSAK_ERR_SUCCESS;
 }
 
-static void set_target_dot(struct sockaddr *adr) {
-#ifdef HAVE_INET_NTOP
-	switch (adr->sa_family) {
-		case AF_INET:
-			inet_ntop(adr->sa_family, &((struct sockaddr_in *)adr)->sin_addr, target_dot, sizeof(target_dot));
-			break;
-		case AF_INET6:
-			inet_ntop(adr->sa_family, &((struct sockaddr_in6 *)adr)->sin6_addr, target_dot, sizeof(target_dot));
-			break;
-	}
-#endif /* HAVE_INET_NTOP */
+char const *get_target_dot(struct sipsak_con_data *cd) {
+	return target_dot;
+}
+
+static void set_target_dot(union sipsak_sockaddr *adr) {
+	inet_ntop(adr->adr.sa_family, (struct sockaddr *)adr, target_dot, sizeof(target_dot));
 }
 
 #ifdef WITH_TLS_TRANSP
@@ -1475,7 +1578,7 @@ static sipsak_err set_target_with_tls(char const *domainname, int ignore_ca_fail
 #endif
 }
 
-static sipsak_err connect_socket(int sock, struct addrinfo *addrs, union sipsak_sockaddr *to_adr) {
+static sipsak_err connect_socket(int sock, struct addrinfo *addrs, union sipsak_sockaddr *to_adr, socklen_t *to_adr_len) {
 	sipsak_err err = SIPSAK_ERR_SUCCESS;
 	struct addrinfo *cur_addr;
 	for (cur_addr = addrs; cur_addr; cur_addr = cur_addr->ai_next) {
@@ -1487,6 +1590,7 @@ static sipsak_err connect_socket(int sock, struct addrinfo *addrs, union sipsak_
 		err = SIPSAK_ERR_NO_IP;
 	}
 	memcpy(to_adr, cur_addr->ai_addr, cur_addr->ai_addrlen);
+	*to_adr_len = cur_addr->ai_addrlen;
 	return err;
 }
 
@@ -1547,16 +1651,17 @@ static sipsak_err set_target_udp(struct sipsak_con_data *cd) {
 	}
 
 	if (cd->csock != -1) {
-		err = connect_socket(cd->csock, res, &cd->to_adr);
+		err = connect_socket(cd->csock, res, &cd->to_adr, &cd->to_adr_len);
 		if (err != SIPSAK_ERR_SUCCESS) {
 			goto err;
 		}
 	} else {
 		memcpy(&cd->to_adr, res->ai_addr, res->ai_addrlen);
+		cd->to_adr_len = res->ai_addrlen;
 	}
 	freeaddrinfo(res);
 	cd->connected = 1;
-	set_target_dot((struct sockaddr *)&cd->to_adr);
+	set_target_dot(&cd->to_adr);
 	cd->rport = get_port((struct sockaddr *)&cd->to_adr);
 	return SIPSAK_ERR_SUCCESS;
 
@@ -1587,13 +1692,13 @@ static sipsak_err set_target_tcp(struct sipsak_con_data *cd) {
 	if (addrinfo_res != 0) {
 		return translate_gai_err(addrinfo_res);
 	}
-	err = connect_socket(cd->csock, res, &cd->to_adr);
+	err = connect_socket(cd->csock, res, &cd->to_adr, &cd->to_adr_len);
 	if (err != SIPSAK_ERR_SUCCESS) {
 		goto err;
 	}
 	freeaddrinfo(res);
 	cd->connected = 1;
-	set_target_dot((struct sockaddr *)&cd->to_adr);
+	set_target_dot(&cd->to_adr);
 	cd->rport = get_port((struct sockaddr *)&cd->to_adr);
 	return SIPSAK_ERR_SUCCESS;
 

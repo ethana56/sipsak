@@ -90,6 +90,8 @@ size_t get_addresses(struct sipsak_address **addresses, char const *domain, unsi
 
 char const *sipsak_address_stringify(struct sipsak_address const *address);
 
+unsigned int read_big_endian_16(unsigned char const *buf);
+
 void *safe_malloc(size_t size);
 
 void *str_alloc(size_t size);

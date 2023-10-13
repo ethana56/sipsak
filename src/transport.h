@@ -45,48 +45,16 @@ struct sipsak_sr_time {
 	int timing;
 };
 
-/*struct sipsak_con_data {
-	struct sockaddr_in adr;
-	unsigned int transport;
-	unsigned long address;
-	int csock;
-	int usock;
-	int dontsend;
-	int dontrecv;
-	int connected;
-	int symmetric;
-	int lport;
-	int rport;
-	char *buf_tmp;
-	int buf_tmp_size;
-};*/
-
-enum sipsak_con_error_type {
-	ADDRINFO,
-	REBIND_CONN,
-};
-
-union sipsak_con_error_sys {
-	int error_errno;
-	int error_gai;
-};
-
-struct sipsak_con_error {
-	enum sipsak_con_error_type type;
-	union sipsak_con_error_sys sys_code;
-};
-
 struct sipsak_con_data {
 	union sipsak_sockaddr from_adr;
 	union sipsak_sockaddr to_adr;
+	socklen_t from_adr_len;
+	socklen_t to_adr_len;
 	int transport;
-	//union sipsak_sockaddr address;
-	/*unsigned long address;*/
 	struct sipsak_address *addresses;
 	size_t num_addresses, cur_address;
 	int csock;
 	int usock;
-	int dontsend;
 	int dontrecv;
 	int connected;
 	int symmetric;
@@ -94,6 +62,7 @@ struct sipsak_con_data {
 	in_port_t rport;
 	char *buf_tmp;
 	int buf_tmp_size;
+	unsigned short last_icmp_type, last_icmp_code;
 };
 
 struct sipsak_counter {
@@ -123,14 +92,11 @@ sipsak_err init_network(struct sipsak_con_data *cd, char const *local_ip, char c
 
 void shutdown_network();
 
-void send_message(char* mes, struct sipsak_con_data *cd,
-			struct sipsak_counter *sc, struct sipsak_sr_time *srt);
+sipsak_err send_message(char* mes, struct sipsak_con_data *cd, struct sipsak_counter *sc, struct sipsak_sr_time *srt);
 
-int recv_message(char *buf, int size, int inv_trans,
-			struct sipsak_delay *sd, struct sipsak_sr_time *srt,
-			struct sipsak_counter *count, struct sipsak_con_data *cd,
-			struct sipsak_regexp *reg, enum sipsak_modes mode, int cseq_counter,
-      char *request, char *response);
+void get_last_icmp(struct sipsak_con_data *cd, unsigned int *last_icmp_type, unsigned int *last_icmp_code);
+
+sipsak_err recv_message(char *buf, size_t buf_size, int inv_trans, struct sipsak_delay *sd, struct sipsak_sr_time *srt, struct sipsak_counter *count, struct sipsak_con_data *cd, struct sipsak_regexp *reg, enum sipsak_modes mode, int cseq_counter, char *request, char *response, size_t *num_read);
 
 sipsak_err set_target(struct sipsak_con_data *con, char const *domainname, int ignore_ca_fail);
 #endif

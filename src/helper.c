@@ -113,35 +113,6 @@ contact: farhan@hotfoon.com
   this is convenient as 0 means 'this' host and the traffic of
   a badly behaving dns system remains inside (you send to 0.0.0.0)
 */
-
-int resolve(char const *address, unsigned short port, int transport, int family, int binding, struct addrinfo **adrs) {
-	struct addrinfo hints;
-	int addrinfo_res;
-
-	char port_str[6];
-
-	memset(&hints, 0, sizeof(hints));
-
-	switch (transport) {
-		case SIP_UDP_TRANSPORT:
-			hints.ai_socktype = SOCK_DGRAM;
-			hints.ai_protocol = IPPROTO_UDP;
-			break;
-		case SIP_TLS_TRANSPORT:
-		case SIP_TCP_TRANSPORT:
-			hints.ai_socktype = SOCK_STREAM;
-			hints.ai_protocol = IPPROTO_TCP;
-			break;
-	}
-
-	hints.ai_family = family;
-	hints.ai_flags = binding ? AI_PASSIVE : 0;
-
-	(void)snprintf(port_str, sizeof(port_str), "%hu", port);
-	addrinfo_res = getaddrinfo(address, port_str, &hints, adrs);
-	return addrinfo_res;
-}
-
 unsigned long getaddress(char *host) {
 	struct hostent* pent;
 	long addr;
@@ -487,6 +458,11 @@ unsigned long getsrvadr(char *host, int *port, unsigned int *transport) {
 	*port = srvport;
 #endif // HAVE_SRV
 	return adr;
+}
+
+
+sipsak_err get_fqdn(char *buf, int numeric, char *hostname) {
+	
 }
 
 /* because the full qualified domain name is needed by many other
@@ -873,6 +849,13 @@ size_t get_addresses(struct sipsak_address **addresses, char const *host, unsign
 
 char const *sipsak_address_stringify(struct sipsak_address const *address) {
 	return address ? address->address : "";
+}
+
+unsigned int read_big_endian_16(unsigned char const *buf) {
+	unsigned int value = 0;
+    value = ((unsigned int)buf[0] << 8);
+    value |= ((unsigned int)buf[1]);
+    return value;
 }
 
 void *safe_malloc(size_t size) {
