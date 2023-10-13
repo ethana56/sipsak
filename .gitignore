@@ -33,3 +33,5 @@ check_md5
 check_auth
 check_header_f
 sipsak
+
+.vscode
