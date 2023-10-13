@@ -1,9 +1,0 @@
-{
-    "C_Cpp.default.configurationProvider": "ms-vscode.makefile-tools",
-    "files.associations": {
-        "*.cpp": "cpp",
-        "ip_icmp.h": "c",
-        "icmp6.h": "c",
-        "sip_strings.h": "c"
-    }
-}
