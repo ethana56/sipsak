@@ -19,6 +19,7 @@
 #define SIPSAK_HELPER_H
 
 #include "sipsak.h"
+#include "error.h"
 
 #ifdef HAVE_SYS_TIME_H
 # include <sys/time.h>
@@ -60,7 +61,7 @@ unsigned long getaddress(char *host);
 
 unsigned long getsrvadr(char *host, int *port, unsigned int *transport);
 
-void get_fqdn(char *buf, int numeric, char *hostname);
+sipsak_err get_fqdn(char *buf, size_t buf_len);
 
 void replace_string(char *mes, char *search, char *replacement);
 
@@ -81,6 +82,10 @@ int is_number(char *number);
 int str_to_int(int mode, char *num);
 
 int read_stdin(char *buf, int size, int ret);
+
+int safe_strcpy(char *dst, size_t *dst_len, char const *src);
+
+char *cpy_str_alloc(char const *str);
 
 void construct_sipsak_address(struct sipsak_address *address, char const *address_str, int port);
 

@@ -69,6 +69,21 @@
   #error Missing check unit test framework!
 #endif
 
+
+char const *ip_to_str(struct sockaddr *adr, char *buf, size_t buf_len) {
+	char const *res;
+	switch (adr->sa_family) {
+		case AF_INET:
+			res = inet_ntop(AF_INET, &((struct sockaddr_in *)adr)->sin_addr, buf, buf_len);
+			break;
+		case AF_INET6:
+			res = inet_ntop(AF_INET6, &((struct sockaddr_in6 *)adr)->sin6_addr, buf, buf_len);
+			break;
+	}
+
+	return res;
+}
+
 /* returns 1 if the string is an IP address, otherwise zero */
 int is_ip(char const *str) {
 	struct in_addr addr4;
@@ -459,89 +474,38 @@ unsigned long getsrvadr(char *host, int *port, unsigned int *transport) {
 #endif // HAVE_SRV
 	return adr;
 }
-
-
-sipsak_err get_fqdn(char *buf, int numeric, char *hostname) {
-	
-}
-
 /* because the full qualified domain name is needed by many other
    functions it will be determined by this function.
 */
-void get_fqdn(char *buf, int numeric, char *hostname) {
-	char hname[100], dname[100], hlp[18];
-	size_t namelen=100;
-	struct hostent* he;
+sipsak_err get_fqdn(char *buf, size_t buf_len) {
+	char hname[100], dname[100];
+	size_t namelen = 100;
 	struct utsname un;
-
-	memset(&hname, 0, sizeof(hname));
-	memset(&dname, 0, sizeof(dname));
-	memset(&hlp, 0, sizeof(hlp));
-
-	if (hostname) {
-		strncpy(buf, hostname, FQDN_SIZE-1);
-		strncpy(hname, hostname, sizeof(hname)-1);
+	if ((uname(&un)) == 0) {
+		strncpy(hname, un.nodename, sizeof(hname) - 1);
+	} else {
+		if (gethostname(hname, namelen) < 0) {
+			return SIPSAK_ERR_SYS;
+		}
 	}
-	else {
-		if ((uname(&un))==0) {
-			strncpy(hname, un.nodename, sizeof(hname)-1);
+#ifdef HAVE_GETHOSTNAME
+	if (strchr(hname, '.') == NULL) {
+		if (getdomainname(dname, namelen) < 0) {
+			return SIPSAK_ERR_SYS;
 		}
-		else {
-			if (gethostname(&hname[0], namelen) < 0) {
-				fprintf(stderr, "error: cannot determine hostname\n");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to determine hostname");
-			}
+		if (strcmp(dname, "(none)") != 0) {
+			snprintf(buf, FQDN_SIZE, "%s.%s", hname, dname);
 		}
-#ifdef HAVE_GETDOMAINNAME
-		/* a hostname with dots should be a domainname */
-		if ((strchr(hname, '.'))==NULL) {
-			if (getdomainname(&dname[0], namelen) < 0) {
-				fprintf(stderr, "error: cannot determine domainname\n");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to get domainname");
-			}
-			if (strcmp(&dname[0],"(none)")!=0)
-				snprintf(buf, FQDN_SIZE, "%s.%s", hname, dname);
-		}
-		else {
-			strncpy(buf, hname, FQDN_SIZE-1);
-		}
+	} else {
+		strncpy(buf, hname, FQDN_SIZE - 1);
+	}
 #endif
+
+	if (strchr(buf, '.') == NULL) {
+		return SIPSAK_ERR_INVAL_DOMAIN;
 	}
 
-	if (!(numeric == 1 && is_ip(buf))) {
-		he=gethostbyname(hname);
-		if (he) {
-			if (numeric == 1) {
-				snprintf(hlp, sizeof(hlp), "%s", inet_ntoa(*(struct in_addr *) he->h_addr_list[0]));
-				strncpy(buf, hlp, FQDN_SIZE-1);
-			}
-			else {
-				if ((strchr(he->h_name, '.'))!=NULL && (strchr(hname, '.'))==NULL) {
-					strncpy(buf, he->h_name, FQDN_SIZE-1);
-				}
-				else {
-					strncpy(buf, hname, FQDN_SIZE-1);
-				}
-			}
-		}
-		else {
-			fprintf(stderr, "error: cannot resolve local hostname: %s\n", hname);
-			exit_code(2, __PRETTY_FUNCTION__, "failed to resolve local hostname");
-		}
-	}
-	if ((strchr(buf, '.'))==NULL) {
-		if (hostname) {
-			fprintf(stderr, "warning: %s is not resolvable... continuing anyway\n", buf);
-			strncpy(buf, hostname, FQDN_SIZE-1);
-		}
-		else {
-			fprintf(stderr, "error: this FQDN or IP is not valid: %s\n", buf);
-			exit_code(2, __PRETTY_FUNCTION__, "invalid IP or FQDN");
-		}
-	}
-
-	if (verbose > 2)
-		printf("fqdnhostname: %s\n", buf);
+	return SIPSAK_ERR_SUCCESS;
 }
 
 /* this function searches for search in mess and replaces it with
@@ -795,6 +759,22 @@ int read_stdin(char *buf, int size, int ret) {
 	return i;
 }
 
+int safe_strcpy(char *dst, size_t *dst_len, char const *src) {
+	size_t amt = *dst_len;
+
+	size_t i;
+
+	for (i = 0; i < amt && src[i]; ++i) {
+		dst[i] = src[i];
+	}
+
+	*dst_len = i + 1;
+
+	dst[i - 1] = '\0';
+
+	return i < amt;
+}
+
 char *cpy_str_alloc(char const *str) {
 	size_t len;
 	char *new_str;
@@ -862,7 +842,7 @@ void *safe_malloc(size_t size) {
 	void *ptr;
 	ptr = malloc(size);
 	if (ptr == NULL) {
-		fprintf(stderr, "errpr: memory allocation for %lu bytes failed\n", size);
+		fprintf(stderr, "error: memory allocation for %lu bytes failed\n", size);
 		exit_code(255, __PRETTY_FUNCTION__, "memory allocation failure");
 	}
 	return ptr;

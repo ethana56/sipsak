@@ -839,6 +839,39 @@ static void print_err(char const *msg, sipsak_err err) {
 	}
 }
 
+static sipsak_err get_local_address_for_uri(char *buf, size_t buf_len, struct sipsak_con_data *cd, int numeric, char const *hostname) {
+	sipsak_err err = SIPSAK_ERR_SUCCESS;
+
+	char ip_buf[46];
+	int ip_type;
+
+	if (numeric && hostname) {
+		err = resolve_str(hostname, buf, buf_len);
+	} else if (hostname) {
+		if (snprintf(buf, buf_len, "%s", hostname) >= buf_len) {
+			err = SIPSAK_ERR_BUFLEN;
+		}
+	} else if (numeric) {
+		err = get_local_address_str(cd, ip_buf, sizeof(ip_buf), &ip_type);
+
+		if (err == SIPSAK_ERR_SUCCESS) {
+			if (ip_type == IPV6) {
+				if (snprintf(buf, buf_len, "[%s]", ip_buf) >= buf_len) {
+					err = SIPSAK_ERR_BUFLEN;
+				}
+			} else {
+				if (snprintf(buf, buf_len, "%s", ip_buf) >= buf_len) {
+					err = SIPSAK_ERR_BUFLEN;
+				}
+			}
+		}
+	} else {
+		err = get_fqdn(buf, buf_len);
+	}
+
+	return err;
+}
+
 /* this is the main function with the loops and modes */
 void shoot(char *buf, int buff_size, struct sipsak_options *options)
 {
@@ -943,6 +976,7 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 	}
 
 	msg_data.domainname = create_msg_domainname(options->domainname, connection.rport);
+	/* msg_data.domainname = options->domainname; */
 	
   /*if (msg_data.lport == 0) {
 	printf("SETTING THE PORT TO 0!!!!!!!\n");
@@ -950,7 +984,16 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
   }*/
 
 	/* determine our hostname */
-	get_fqdn(&fqdn[0], options->numeric, options->hostname);
+
+	err = get_local_address_for_uri(fqdn, sizeof(fqdn), &connection, options->numeric, options->hostname);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		print_err("Error getting fqdn", err);
+		exit_code(3, __PRETTY_FUNCTION__, "error getting fqdn");
+	}
+
+	if (verbose > 2) {
+		printf("fqdn: %s\n", fqdn);
+	}
 
 	if (options->replace_b == 1){
 		replace_string(request, "$dsthost$", options->domainname);
@@ -1103,7 +1146,8 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 				case SIPSAK_ERR_ICMP_UNOWNED_PORT:
 				case SIPSAK_ERR_ICMP_UNOWNED_PROTO:
 				case SIPSAK_ERR_ICMP_UNOWNED_TYPE:
-					printf("erronious ICMP message");
+				case SIPSAK_ERR_ICMP_UNOWNED:
+					printf("erronious ICMP message\n");
 					dontsend = 1;
 					continue;
 				case SIPSAK_ERR_AGAIN:

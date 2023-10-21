@@ -20,6 +20,8 @@ sipsak_err translate_gai_err(int gai_err) {
             return SIPSAK_ERR_FATAL_RES;
         case EAI_SYSTEM:
             return SIPSAK_ERR_SYS;
+        case 0:
+            return SIPSAK_ERR_SUCCESS;
         default:
             return SIPSAK_ERR_RES_UNKNOWN;
     }
@@ -55,6 +57,19 @@ char const *sipsak_strerror(sipsak_err err) {
             return "system error";
         case SIPSAK_ERR_RAWBUF_SIZE:
             return "rawbuf too small";
+        case SIPSAK_ERR_ICMP4:
+            return "icmp4";
+        case SIPSAK_ERR_ICMP6:
+            return "icmp6";
+        case SIPSAK_ERR_ICMP_UNOWNED:
+            return "icmp response not meant for this socket";
+        case SIPSAK_ERR_ICMP_UNOWNED_PROTO:
+            return "icmp response not meant for this socket. Wrong protocol";
+        case SIPSAK_ERR_ICMP_UNOWNED_TYPE:
+            return "icmp response not meant for this socket. Wrong type";
+        case SIPSAK_ERR_ICMP_UNOWNED_PORT:
+            return "icmp response not meant for this socket. Wrong port";
+        
         default:
             return "unknown error";
     }

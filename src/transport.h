@@ -33,6 +33,10 @@
 #define PREF_IPV4  1
 #define PREF_IPV6  2
 
+#define IPV4 0
+#define IPV6 1
+
+
 struct sipsak_sr_time {
 	struct timeval sendtime;
 	struct timeval recvtime;
@@ -89,6 +93,10 @@ void set_addresses(struct sipsak_con_data *cd, struct sipsak_address *addresses,
 struct sipsak_address const *get_cur_address(struct sipsak_con_data *cd);
 
 sipsak_err init_network(struct sipsak_con_data *cd, char const *local_ip, char const *ca_file);
+
+sipsak_err resolve_str(char const *address, char *buf, size_t buf_len);
+
+sipsak_err get_local_address_str(struct sipsak_con_data *cd, char *buf, size_t buf_len, int *ip_type);
 
 void shutdown_network();
 
