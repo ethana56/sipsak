@@ -481,6 +481,70 @@ int increase_cseq(char *message, char *reply)
 	return cs;
 }
 
+void parse_non_ipv6(char *start, char **host, int *port) 
+{
+	char *col;
+	if ((col = strchr(start, ':')) != NULL) {
+		*col = '\0';
+		*port = str_to_int(1, &col[1]);
+	}
+	*host = start;
+}
+
+void parse_host(char *start, char **host, int *port) 
+{
+	char *close_bracket;
+	if (*start != '[' || (close_bracket = strchr(start, ']')) == NULL) {
+		parse_non_ipv6(start, host, port);
+		return;
+	}
+
+	if (close_bracket[1] != ':' && close_bracket[1] != '\0') {
+		parse_non_ipv6(start, host, port);
+		return;
+	}
+
+	*start = '\0';
+	*close_bracket = '\0';
+	*host = &start[1];
+
+	if (close_bracket[1] == ':') {
+		*port = str_to_int(1, &close_bracket[2]);
+	}
+}
+
+void parse_uri_with_at(char *uri, char *col, char *at, char **scheme, char **user, char **host, int *port) 
+{
+	//*col = '\0';
+	*at = '\0';
+	if (at > col) { /*If colon is seperating scheme from user*/
+		*col = '\0';
+		*scheme = uri;
+		*user = ++col;
+		parse_host(&at[1], host, port);
+	} 
+	else { /*If colon is seperating the port of part of ipv6 address*/
+		*user = uri;
+		parse_host(&at[1], host, port);
+	}
+}
+
+void parse_uri_without_at(char *uri, char *col, char **scheme, char **host, int *port) {
+
+	if (is_number(&col[1])) {
+		parse_host(uri, host, port);
+	} else {
+		if (uri[0] == '[' && col > &uri[0]) {
+			parse_host(uri, host, port);
+		} else {
+			*col = '\0';
+			*scheme = uri;
+			parse_host(&col[1], host, port);
+			
+		}
+	}
+}
+
 /* separates the given URI into the parts by setting the pointer but it
    destroyes the URI */
 void parse_uri(char *uri, char **scheme, char **user, char **host, int *port)
@@ -491,42 +555,10 @@ void parse_uri(char *uri, char **scheme, char **user, char **host, int *port)
 	*scheme = *user = *host = NULL;
 	if ((col=strchr(uri,':'))!=NULL) {
 		if ((at=strchr(uri,'@'))!=NULL) {
-			*col = '\0';
-			*at = '\0';
-			if (at > col) {
-				*scheme = uri;
-				*user = ++col;
-				*host = ++at;
-				if ((col2=strchr(*host,':'))!=NULL) {
-					*col2 = '\0';
-					*port = str_to_int(1, ++col2);
-				}
-			}
-			else {
-				*user = uri;
-				*host = ++at;
-				*port = str_to_int(1, ++col);
-			}
+			parse_uri_with_at(uri, col, at, scheme, user, host, port);
 		}
 		else {
-			*col = '\0';
-			col++;
-			if ((col2=strchr(col,':'))!=NULL) {
-				*col2 = '\0';
-				*scheme = uri;
-				*host = col;
-				*port = str_to_int(1, ++col2);
-			}
-			else {
-				if (is_number(col)) {
-					*host = uri;
-					*port = str_to_int(1, col);
-				}
-				else {
-					*scheme = uri;
-					*host = col;
-				}
-			}
+			parse_uri_without_at(uri, col, scheme, host, port);
 		}
 	}
 	else {
@@ -582,6 +614,8 @@ char* uri_from_contact(char *message)
 	}
 	
 	*end = c;
+
+	printf("TMP: %s\n", tmp);
 
 	return tmp;
 }

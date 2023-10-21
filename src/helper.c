@@ -63,13 +63,39 @@
 
 #include "helper.h"
 #include "exit_code.h"
+#include "error.h"
 
 #if defined(RUNNING_CHECK) && !defined(HAVE_CHECK_H)
   #error Missing check unit test framework!
 #endif
 
+
+char const *ip_to_str(struct sockaddr *adr, char *buf, size_t buf_len) {
+	char const *res;
+	switch (adr->sa_family) {
+		case AF_INET:
+			res = inet_ntop(AF_INET, &((struct sockaddr_in *)adr)->sin_addr, buf, buf_len);
+			break;
+		case AF_INET6:
+			res = inet_ntop(AF_INET6, &((struct sockaddr_in6 *)adr)->sin6_addr, buf, buf_len);
+			break;
+	}
+
+	return res;
+}
+
 /* returns 1 if the string is an IP address, otherwise zero */
-int is_ip(char *str) {
+int is_ip(char const *str) {
+	struct in_addr addr4;
+	struct in6_addr addr6;
+	int result;
+	result = inet_pton(AF_INET, str, &addr4);
+	if (result == 1) return 1;
+	result = inet_pton(AF_INET6, str, &addr6);
+	return result == 1;
+}
+
+/*int is_ip(char *str) {
 	int octet = 0;
 
 	while (*str) {
@@ -88,11 +114,11 @@ int is_ip(char *str) {
 	}
 
 	return (*str == '\0' && octet == 4) ? 1 : 0;
-}
+}*/
 
 /* take either a dot.decimal string of ip address or a 
 domain name and returns a NETWORK ordered long int containing
-the address. i chose to internally represent the address as long for speedier
+the address. I chose to internally represent the address as long for speedier
 comparisons.
 
 any changes to getaddress have to be patched back to the net library.
@@ -102,7 +128,6 @@ contact: farhan@hotfoon.com
   this is convenient as 0 means 'this' host and the traffic of
   a badly behaving dns system remains inside (you send to 0.0.0.0)
 */
-
 unsigned long getaddress(char *host) {
 	struct hostent* pent;
 	long addr;
@@ -449,84 +474,38 @@ unsigned long getsrvadr(char *host, int *port, unsigned int *transport) {
 #endif // HAVE_SRV
 	return adr;
 }
-
 /* because the full qualified domain name is needed by many other
    functions it will be determined by this function.
 */
-void get_fqdn(char *buf, int numeric, char *hostname) {
-	char hname[100], dname[100], hlp[18];
-	size_t namelen=100;
-	struct hostent* he;
+sipsak_err get_fqdn(char *buf, size_t buf_len) {
+	char hname[100], dname[100];
+	size_t namelen = 100;
 	struct utsname un;
-
-	memset(&hname, 0, sizeof(hname));
-	memset(&dname, 0, sizeof(dname));
-	memset(&hlp, 0, sizeof(hlp));
-
-	if (hostname) {
-		strncpy(buf, hostname, FQDN_SIZE-1);
-		strncpy(hname, hostname, sizeof(hname)-1);
+	if ((uname(&un)) == 0) {
+		strncpy(hname, un.nodename, sizeof(hname) - 1);
+	} else {
+		if (gethostname(hname, namelen) < 0) {
+			return SIPSAK_ERR_SYS;
+		}
 	}
-	else {
-		if ((uname(&un))==0) {
-			strncpy(hname, un.nodename, sizeof(hname)-1);
+#ifdef HAVE_GETHOSTNAME
+	if (strchr(hname, '.') == NULL) {
+		if (getdomainname(dname, namelen) < 0) {
+			return SIPSAK_ERR_SYS;
 		}
-		else {
-			if (gethostname(&hname[0], namelen) < 0) {
-				fprintf(stderr, "error: cannot determine hostname\n");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to determine hostname");
-			}
+		if (strcmp(dname, "(none)") != 0) {
+			snprintf(buf, FQDN_SIZE, "%s.%s", hname, dname);
 		}
-#ifdef HAVE_GETDOMAINNAME
-		/* a hostname with dots should be a domainname */
-		if ((strchr(hname, '.'))==NULL) {
-			if (getdomainname(&dname[0], namelen) < 0) {
-				fprintf(stderr, "error: cannot determine domainname\n");
-				exit_code(2, __PRETTY_FUNCTION__, "failed to get domainname");
-			}
-			if (strcmp(&dname[0],"(none)")!=0)
-				snprintf(buf, FQDN_SIZE, "%s.%s", hname, dname);
-		}
-		else {
-			strncpy(buf, hname, FQDN_SIZE-1);
-		}
+	} else {
+		strncpy(buf, hname, FQDN_SIZE - 1);
+	}
 #endif
+
+	if (strchr(buf, '.') == NULL) {
+		return SIPSAK_ERR_INVAL_DOMAIN;
 	}
 
-	if (!(numeric == 1 && is_ip(buf))) {
-		he=gethostbyname(hname);
-		if (he) {
-			if (numeric == 1) {
-				snprintf(hlp, sizeof(hlp), "%s", inet_ntoa(*(struct in_addr *) he->h_addr_list[0]));
-				strncpy(buf, hlp, FQDN_SIZE-1);
-			}
-			else {
-				if ((strchr(he->h_name, '.'))!=NULL && (strchr(hname, '.'))==NULL) {
-					strncpy(buf, he->h_name, FQDN_SIZE-1);
-				}
-				else {
-					strncpy(buf, hname, FQDN_SIZE-1);
-				}
-			}
-		}
-		else {
-			fprintf(stderr, "error: cannot resolve local hostname: %s\n", hname);
-			exit_code(2, __PRETTY_FUNCTION__, "failed to resolve local hostname");
-		}
-	}
-	if ((strchr(buf, '.'))==NULL) {
-		if (hostname) {
-			fprintf(stderr, "warning: %s is not resolvable... continuing anyway\n", buf);
-			strncpy(buf, hostname, FQDN_SIZE-1);
-		}
-		else {
-			fprintf(stderr, "error: this FQDN or IP is not valid: %s\n", buf);
-			exit_code(2, __PRETTY_FUNCTION__, "invalid IP or FQDN");
-		}
-	}
-
-	if (verbose > 2)
-		printf("fqdnhostname: %s\n", buf);
+	return SIPSAK_ERR_SUCCESS;
 }
 
 /* this function searches for search in mess and replaces it with
@@ -778,6 +757,95 @@ int read_stdin(char *buf, int size, int ret) {
 	if (verbose)
 		fprintf(stderr, "warning: readin buffer size exceeded\n");
 	return i;
+}
+
+int safe_strcpy(char *dst, size_t *dst_len, char const *src) {
+	size_t amt = *dst_len;
+
+	size_t i;
+
+	for (i = 0; i < amt && src[i]; ++i) {
+		dst[i] = src[i];
+	}
+
+	*dst_len = i + 1;
+
+	dst[i - 1] = '\0';
+
+	return i < amt;
+}
+
+char *cpy_str_alloc(char const *str) {
+	size_t len;
+	char *new_str;
+	len = strlen(str);
+	new_str = safe_malloc(len + 1);
+	strcpy(new_str, str);
+	return new_str;
+}
+
+void construct_sipsak_address(struct sipsak_address *address, char const *address_str, int port) {
+	if (port == 0) {
+		address->port = 5060;
+	} else if (port < 0 || port > 65535) {
+		fprintf(stderr, "port %d is out of range.", port);
+		exit_code(2, __PRETTY_FUNCTION__, "port is out of range");
+	} else {
+		address->port = port;
+	}
+	address->address = cpy_str_alloc(address_str);
+}
+
+void destroy_sipsak_address(struct sipsak_address *address) {
+	free(address->address);
+	address->address = NULL;
+	address->port = 0;
+}
+
+void destroy_sipsak_addresses(struct sipsak_address *addresses, size_t num_addresses) {
+	size_t i;
+	for (i = 0; i < num_addresses; ++i) {
+		destroy_sipsak_address(&addresses[i]);
+	}
+	free(addresses);
+}
+
+static size_t create_address_no_lookup(struct sipsak_address **address, char const *host, unsigned int port) {
+	*address = safe_malloc(sizeof(struct sipsak_address));
+	construct_sipsak_address(*address, host, port);
+	return 1;
+}
+
+size_t get_addresses(struct sipsak_address **addresses, char const *host, unsigned int port, int *transport) {
+	size_t num_addresses = 0;
+	if (!is_ip(host) && !port) {
+		/*num_addresses = getsrvaddress(addresses, host, transport);*/
+	}
+	if (num_addresses == 0) {
+		num_addresses = create_address_no_lookup(addresses, host, port);
+	}
+	return num_addresses;
+}
+
+char const *sipsak_address_stringify(struct sipsak_address const *address) {
+	return address ? address->address : "";
+}
+
+unsigned int read_big_endian_16(unsigned char const *buf) {
+	unsigned int value = 0;
+    value = ((unsigned int)buf[0] << 8);
+    value |= ((unsigned int)buf[1]);
+    return value;
+}
+
+void *safe_malloc(size_t size) {
+	void *ptr;
+	ptr = malloc(size);
+	if (ptr == NULL) {
+		fprintf(stderr, "error: memory allocation for %lu bytes failed\n", size);
+		exit_code(255, __PRETTY_FUNCTION__, "memory allocation failure");
+	}
+	return ptr;
 }
 
 /* tries to allocate the given size of memory and sets it all to zero.

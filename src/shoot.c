@@ -30,9 +30,9 @@
 #ifdef HAVE_NETINET_IN_H
 # include <netinet/in.h>
 #endif
+#include <errno.h>
 
 #include "shoot.h"
-
 #include "request.h"
 #include "auth.h"
 #include "header_f.h"
@@ -85,66 +85,88 @@ static inline void create_usern(char *target, char *username, int number)
 	}
 }
 
-/* tries to take care of a redirection */
-void handle_3xx(struct sipsak_con_data *con, struct sipsak_msg_data *message,
-    int warning_ext, int outbound_proxy, char *domainname
-#ifdef WITH_TLS_TRANSP
-    , int ignore_ca_fail
-#endif
-    )
+static char *create_msg_domainname(char const *domainname, unsigned int port) {
+	size_t domainname_len;
+	char *result;
+	domainname_len = strlen(domainname);
+	result = str_alloc(domainname_len + 1 + 6);
+	snprintf(result, domainname_len + 6, "%s:%u", domainname, port);
+	return result;
+}
+
+static sipsak_err select_address(struct sipsak_con_data *cd, char const *domainname, int ignore_ca_fail) {
+	sipsak_err err;
+
+	while ((err = set_target(cd, domainname, ignore_ca_fail)) != SIPSAK_ERR_EOF) {
+		if (err == SIPSAK_ERR_SUCCESS) {
+			break;
+		}
+		if (check_errno(err)) {
+			fprintf(stderr, "failed to connect to: %s: %s: %s\n", 
+				sipsak_address_stringify(get_cur_address(cd)), 
+				sipsak_strerror(err), 
+				strerror(errno));
+		} else {
+			fprintf(stderr, "failed to connect to: %s: %s\n", sipsak_address_stringify(get_cur_address(cd)), sipsak_strerror(err));
+		}
+	}
+
+	return err;
+}
+
+/* Tries to take care of a redirection */
+static void handle_3xx(struct sipsak_con_data *con, 
+	struct sipsak_msg_data *message, 
+	int warning_ext,
+	int outbound_proxy,
+	char *domainname,
+	int ignore_ca_fail
+)
 {
+
+	struct sipsak_address *addresses;
+	size_t num_addresses;
+	
 	char *uscheme, *uuser, *uhost, *contact;
+	int uport;
 
 	printf("** received redirect ");
 	if (warning_ext == 1) {
 		printf("from ");
 		warning_extract(received);
 		printf("\n");
-	}
-	else
+	} else {
 		printf("\n");
+	}
+	contact = uri_from_contact(received);
+	if (contact == NULL) {
+		fprintf(stderr, "error: cannot find Contact in this redirect:\n%s\n", received);
+		exit_code(3, __PRETTY_FUNCTION__, "missing Contact header in reply");
+	}
 
-  /* try to find the contact in the redirect */
-  contact = uri_from_contact(received);
-  if (contact==NULL) {
-    fprintf(stderr, "error: cannot find Contact in this "
-      "redirect:\n%s\n", received);
-    exit_code(3, __PRETTY_FUNCTION__, "missing Contact header in reply");
-  }
-  /* correct our request */
-  uri_replace(request, contact);
-  message->cseq_counter = new_transaction(request, response);
-  /* extract the needed information*/
-  con->rport = 0;
-  con->address = 0;
-  parse_uri(contact, &uscheme, &uuser, &uhost, &con->rport);
-  if (!con->rport)
-    con->address = getsrvadr(uhost, &con->rport, &con->transport);
-  if (!con->address)
-    con->address = getaddress(uhost);
-  if (!con->address){
-    fprintf(stderr, "error: cannot determine host "
-        "address from Contact of redirect:"
-        "\n%s\n", received);
-    exit_code(2, __PRETTY_FUNCTION__, "missing host in Contact header");
-  }
-  if (!con->rport) {
-    con->rport = 5060;
-  }
-  free(contact);
-  if (!outbound_proxy)
-    con->connected = set_target(&(con->adr), con->address, con->rport,
-        con->csock, con->connected, con->transport, domainname
-#ifdef WITH_TLS_TRANSP
-        , ignore_ca_fail
-#endif
-        );
+	uri_replace(request, contact);
+
+	message->cseq_counter = new_transaction(request, response);
+
+	if (outbound_proxy) {
+		return;
+	}
+	parse_uri(contact, &uscheme, &uuser, &uhost, &uport);
+	num_addresses = get_addresses(&addresses, uhost, uport, &con->transport); /* TODO: decide if user provided transport should override this*/
+	set_addresses(con, addresses, num_addresses); 
+	if (select_address(con, domainname, ignore_ca_fail) < 0) {
+		fprintf(stderr, "cannot find good ip address in the domain %s\n", uhost);
+		exit_code(2, __PRETTY_FUNCTION__, "cannot find valid domain");
+	}
+	free(message->domainname);
+	message->domainname = create_msg_domainname(get_cur_address(con)->address, get_cur_address(con)->port);
+	free(contact);
 }
 
 /* takes care of replies in the trace route mode */
 void trace_reply(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
     struct sipsak_sr_time *timer, struct sipsak_con_data *con,
-    struct sipsak_delay *delay, struct sipsak_msg_data *message)
+    struct sipsak_delay *delay, struct sipsak_msg_data *message, int *dontsend)
 {
 	char *contact;
 
@@ -179,7 +201,7 @@ void trace_reply(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
 			print_message_line(received);
 		}
 		delay->retryAfter = timer->timer_t2;
-		con->dontsend=1;
+		*dontsend = 1;
 		return;
 	}
 	else {
@@ -212,7 +234,7 @@ void trace_reply(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
 /* takes care of replies in the default mode */
 void handle_default(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
     struct sipsak_sr_time *timers, struct sipsak_con_data *con,
-    struct sipsak_delay *delay, struct sipsak_msg_data *message)
+    struct sipsak_delay *delay, struct sipsak_msg_data *message, int* dontsend)
 {
 	/* in the normal send and reply case anything other 
 	   then 1xx will be treated as final response*/
@@ -239,7 +261,7 @@ void handle_default(struct sipsak_regexp *regexp, struct sipsak_counter *counter
 		else {
 			delay->retryAfter = timers->timer_t2;
 		}
-		con->dontsend = 1;
+		*dontsend = 1;
 		return;
 	}
 	else {
@@ -329,10 +351,10 @@ void handle_randtrash(int warning_ext, struct sipsak_counter *counter,
 }
 
 /* takes care of replies in the usrloc mode */
-void handle_usrloc(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
+static void handle_usrloc(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
     int rand_rem, char *username, int nagios_warn, struct sipsak_sr_time *timers,
     char *mes_body, enum sipsak_modes mode, struct sipsak_con_data *con,
-    struct sipsak_delay *delay, struct sipsak_msg_data *message)
+    struct sipsak_delay *delay, struct sipsak_msg_data *message, int *dontsend)
 {
 	char *crlf;
 	char ruri[11+12+20]; //FIXME: username length 20 should be dynamic
@@ -348,7 +370,7 @@ void handle_usrloc(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
 		else {
 			delay->retryAfter = timers->timer_t2;
 		}
-		con->dontsend = 1;
+		*dontsend = 1;
 	}
 	else {
 		switch (usrlocstep) {
@@ -465,7 +487,7 @@ void handle_usrloc(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
 						printf("ignoring INVITE retransmission\n");
 					}
 					counter->retrans_r_c++;
-					con->dontsend=1;
+					*dontsend = 1;
 					return;
 				}
 				if (regexec(&(regexp->okexp), received, 0, 0, 0) == REG_NOERROR) {
@@ -477,7 +499,7 @@ void handle_usrloc(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
 					}
 					/* ACK was send already earlier generically */
 					usrlocstep=INV_ACK_RECV;
-					con->dontsend=1;
+					*dontsend = 1;
 				}
 				else {
 					fprintf(stderr, "received:\n%s\nerror: did not "
@@ -495,7 +517,7 @@ void handle_usrloc(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
 						printf("ignoring 200 OK retransmission\n");
 					}
 					counter->retrans_r_c++;
-					con->dontsend=1;
+					*dontsend = 1;
 					return;
 				}
 				sprintf(ruri, "%s sip:sipsak_conf@", ACK_STR);
@@ -612,7 +634,7 @@ void handle_usrloc(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
 						printf("ignoring MESSAGE retransmission\n");
 					}
 					counter->retrans_r_c++;
-					con->dontsend=1;
+					*dontsend = 1;
 					return;
 				}
 				if (regexec(&(regexp->okexp), received, 0, 0, 0) == REG_NOERROR) {
@@ -709,7 +731,7 @@ void handle_usrloc(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
 						printf("ignoring MESSAGE retransmission\n");
 					}
 					counter->retrans_r_c++;
-					con->dontsend=1;
+					*dontsend = 1;
 					return;
 				}
 				if (regexec(&(regexp->okexp), received, 0, 0, 0) == REG_NOERROR) {
@@ -748,7 +770,7 @@ void handle_usrloc(struct sipsak_regexp *regexp, struct sipsak_counter *counter,
 }
 
 void before_sending(struct sipsak_counter *counter, struct sipsak_msg_data *msg_data,
-    enum sipsak_modes mode, struct sipsak_con_data *con)
+    enum sipsak_modes mode, struct sipsak_con_data *con, int dontsend)
 {
 	/* some initial output */
 	if ((mode == SM_USRLOC ||
@@ -757,7 +779,7 @@ void before_sending(struct sipsak_counter *counter, struct sipsak_msg_data *msg_
        mode == SM_INVITE ||
        mode == SM_MESSAGE) &&
       (verbose > 1) &&
-      (con->dontsend == 0)) {
+      (dontsend == 0)) {
 		switch (usrlocstep) {
 			case REG_REP:
 				if (counter->nameend>0)
@@ -809,11 +831,58 @@ void before_sending(struct sipsak_counter *counter, struct sipsak_msg_data *msg_
 	}
 }
 
+static void print_err(char const *msg, sipsak_err err) {
+	if (check_errno(err)) {
+		fprintf(stderr, "%s: %s: %s\n", msg, sipsak_strerror(err), strerror(errno));
+	} else {
+		fprintf(stderr, "%s: %s\n", msg, sipsak_strerror(err));
+	}
+}
+
+static sipsak_err get_local_address_for_uri(char *buf, size_t buf_len, struct sipsak_con_data *cd, int numeric, char const *hostname) {
+	sipsak_err err = SIPSAK_ERR_SUCCESS;
+
+	char ip_buf[46];
+	int ip_type;
+
+	if (numeric && hostname) {
+		err = resolve_str(hostname, buf, buf_len);
+	} else if (hostname) {
+		if (snprintf(buf, buf_len, "%s", hostname) >= buf_len) {
+			err = SIPSAK_ERR_BUFLEN;
+		}
+	} else if (numeric) {
+		err = get_local_address_str(cd, ip_buf, sizeof(ip_buf), &ip_type);
+
+		if (err == SIPSAK_ERR_SUCCESS) {
+			if (ip_type == IPV6) {
+				if (snprintf(buf, buf_len, "[%s]", ip_buf) >= buf_len) {
+					err = SIPSAK_ERR_BUFLEN;
+				}
+			} else {
+				if (snprintf(buf, buf_len, "%s", ip_buf) >= buf_len) {
+					err = SIPSAK_ERR_BUFLEN;
+				}
+			}
+		}
+	} else {
+		err = get_fqdn(buf, buf_len);
+	}
+
+	return err;
+}
+
 /* this is the main function with the loops and modes */
 void shoot(char *buf, int buff_size, struct sipsak_options *options)
 {
+	sipsak_err err;
+
+	size_t recv_amt, num_read = 0;
+
+	unsigned int icmp_type, icmp_code;
+
 	struct timespec sleep_ms_s, sleep_rem;
-	int ret, cseqtmp, rand_tmp;
+	int cseqtmp, rand_tmp;
 	char buf2[BUFSIZE], buf3[BUFSIZE], lport_str[LPORT_STR_LEN];
   char fqdn[FQDN_SIZE];
 
@@ -823,6 +892,8 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
   struct sipsak_delay delays;
   struct sipsak_msg_data msg_data;
   struct sipsak_regexp regexps;
+
+  int dontsend = 0;
 
 	inv_trans = 0;
 	usrlocstep = REG_REP;
@@ -845,7 +916,7 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 
 	connection.csock = connection.usock = -1;
 	connection.transport = options->transport;
-	connection.address = options->address;
+	set_addresses(&connection, options->addresses, options->num_addresses);
 	connection.symmetric = options->symmetric;
 	connection.lport = options->lport;
 	connection.rport = options->rport;
@@ -882,7 +953,7 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 	msg_data.repl_buff = response;
 	msg_data.username = options->username;
 	msg_data.usern = NULL;
-	msg_data.domainname = options->domainname;
+	//msg_data.domainname = options->domainname;
 	msg_data.contact_uri = options->contact_uri;
 	msg_data.con_dis = options->con_dis;
 	msg_data.from_uri = options->from_uri;
@@ -890,17 +961,39 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 	msg_data.headers = options->headers;
 	msg_data.fqdn = fqdn;
 
-	init_network(&connection, options->local_ip
-#ifdef WITH_TLS_TRANSP
-      , options->ca_file
-#endif
-      );
-  if (msg_data.lport == 0) {
+	err = init_network(&connection, options->local_ip, options->ca_file);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		print_err("error initializing sockets", err);
+		exit_code(2, __PRETTY_FUNCTION__, "error initializing network");
+	}
+
+	msg_data.lport = connection.lport;
+
+	err = select_address(&connection, options->domainname, options->ignore_ca_fail);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		fprintf(stderr, "cannot find a good ip address in the domain: %s\n", options->domainname);
+		exit_code(2, __PRETTY_FUNCTION__, "cannot find a good ip address in the domain");
+	}
+
+	msg_data.domainname = create_msg_domainname(options->domainname, connection.rport);
+	/* msg_data.domainname = options->domainname; */
+	
+  /*if (msg_data.lport == 0) {
+	printf("SETTING THE PORT TO 0!!!!!!!\n");
     msg_data.lport = connection.lport;
-  }
+  }*/
 
 	/* determine our hostname */
-	get_fqdn(&fqdn[0], options->numeric, options->hostname);
+
+	err = get_local_address_for_uri(fqdn, sizeof(fqdn), &connection, options->numeric, options->hostname);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		print_err("Error getting fqdn", err);
+		exit_code(3, __PRETTY_FUNCTION__, "error getting fqdn");
+	}
+
+	if (verbose > 2) {
+		printf("fqdn: %s\n", fqdn);
+	}
 
 	if (options->replace_b == 1){
 		replace_string(request, "$dsthost$", options->domainname);
@@ -1012,17 +1105,9 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 			set_maxforw(request, options->maxforw);
 	}
 
-	connection.connected = set_target(&(connection.adr), connection.address,
-      connection.rport, connection.csock, connection.connected,
-      connection.transport, options->domainname
-#ifdef WITH_TLS_TRANSP
-      , options->ignore_ca_fail
-#endif
-      );
-
 	/* here we go until someone decides to exit */
 	while(1) {
-		before_sending(&counters, &msg_data, options->mode, &connection);
+		before_sending(&counters, &msg_data, options->mode, &connection, dontsend);
 
 		if (options->sleep_ms == -2) {
 			rand_tmp = rand();
@@ -1037,119 +1122,139 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 			nanosleep(&sleep_ms_s, &sleep_rem);
 		}
 
-		send_message(request, &connection, &counters, &timers);
+		if (!dontsend) {
+			if (verbose > 2) {
+				printf("\nrequest:\n%s", request);
+			}
+			err = send_message(request, &connection, &counters, &timers);
+			if (err != SIPSAK_ERR_SUCCESS) {
+				print_err("unable to send sip message", err);
+				exit_code(2, __PRETTY_FUNCTION__, "unable to send sip message");
+			}
+		}
+		dontsend = 0;
 
 		/* in flood we are only interested in sending so skip the rest */
 		if (options->mode != SM_FLOOD) {
-			ret = recv_message(received, BUFSIZE, inv_trans, &delays, &timers,
+			err = recv_message(received + num_read, BUFSIZE - num_read, inv_trans, &delays, &timers,
 						&counters, &connection, &regexps, options->mode, msg_data.cseq_counter,
-            request, response);
-			if(ret > 0)
-			{
-				if (usrlocstep == INV_OK_RECV) {
-					swap_ptr(&response, &request);
-				}
-				/* send ACK for non-provisional reply on INVITE */
-				if ((STRNCASECMP(request, "INVITE", 6)==0) && 
-						(regexec(&(regexps.replyexp), received, 0, 0, 0) == REG_NOERROR) && 
-						(regexec(&(regexps.proexp), received, 0, 0, 0) == REG_NOMATCH)) { 
-					build_ack(request, received, response, &regexps);
-					connection.dontsend = 0;
-					inv_trans = 0;
-					/* lets fire the ACK to the server */
-					send_message(response, &connection, &counters, &timers);
-					inv_trans = 1;
-				}
-				/* check for old CSeq => ignore retransmission */
-				cseqtmp = get_cseq(received);
-				if ((0 < cseqtmp) && (cseqtmp < msg_data.cseq_counter)) {
-					if (verbose>0) {
-						printf("ignoring retransmission\n");
-					}
-					counters.retrans_r_c++;
-					connection.dontsend = 1;
+            request, response, &recv_amt);
+
+			switch (err) {
+				case SIPSAK_ERR_SUCCESS:
+					break;
+				case SIPSAK_ERR_ICMP_UNOWNED_PORT:
+				case SIPSAK_ERR_ICMP_UNOWNED_PROTO:
+				case SIPSAK_ERR_ICMP_UNOWNED_TYPE:
+				case SIPSAK_ERR_ICMP_UNOWNED:
+					printf("erronious ICMP message\n");
+					dontsend = 1;
 					continue;
+				case SIPSAK_ERR_AGAIN:
+					if (options->transport != SIP_UDP_TRANSPORT) {
+						dontsend = 1;
 					}
-				else if (regexec(&(regexps.authexp), received, 0, 0, 0) == REG_NOERROR) {
-					if (!msg_data.username && !options->auth_username) {
-						if (timers.timing > 0) {
-							timers.timing--;
-							counters.run++;
-							if (timers.timing == 0) {
-								printf("%.3f/%.3f/%.3f ms\n", delays.small_delay, delays.all_delay / counters.run, delays.big_delay);
-								exit_code(0, __PRETTY_FUNCTION__, NULL);
-							}
-							msg_data.cseq_counter = new_transaction(request, response);
-							delays.retryAfter = timers.timer_t1;
-							continue;
-						}
-						fprintf(stderr, "%s\nerror: received 40[17] but cannot "
-							"authentication without a username or auth username\n", received);
-						log_message(request);
-						exit_code(2, __PRETTY_FUNCTION__, "missing username for authentication");
-					}
-					/* prevents a strange error */
-					regcomp(&(regexps.authexp), "^SIP/[0-9]\\.[0-9] 40[17] ", REG_EXTENDED|REG_NOSUB|REG_ICASE);
-					insert_auth(request, received, msg_data.username, options->password,
-              options->auth_username, options->authhash, counters.namebeg,
-              counters.nameend);
-					if (verbose > 2)
-						printf("\nreceived:\n%s\n", received);
-					msg_data.cseq_counter = new_transaction(request, response);
+					num_read += recv_amt;
 					continue;
-				} /* if auth...*/
-				/* lets see if received a redirect */
-				if (options->redirects == 1 &&
-            regexec(&(regexps.redexp), received, 0, 0, 0) == REG_NOERROR) {
-					handle_3xx(&connection, &msg_data, options->warning_ext,
-              options->outbound_proxy, options->domainname
-#ifdef WITH_TLS_TRANSP
-                     , options->ignore_ca_fail
-#endif
-                     );
-				} /* if redircts... */
-				else if (options->mode == SM_TRACE) {
-					trace_reply(&regexps, &counters, &timers, &connection, &delays,
-              &msg_data);
-				} /* if trace ... */
-				else if (options->mode == SM_USRLOC ||
-                 options->mode == SM_USRLOC_INVITE ||
-                 options->mode == SM_USRLOC_MESSAGE ||
-                 options->mode == SM_INVITE ||
-                 options->mode == SM_MESSAGE) {
-					handle_usrloc(&regexps, &counters,
-                        options->rand_rem, msg_data.username,
-                        options->nagios_warn, &timers, msg_data.mes_body,
-                        options->mode, &connection, &delays, &msg_data);
+				case SIPSAK_ERR_ICMP4:
+					get_last_icmp(&connection, &icmp_type, &icmp_code);
+					printf("Recieved ICMP4 error: type: %u, code: %u\n", icmp_type, icmp_code);
+					exit_code(3, __PRETTY_FUNCTION__, "recieved ICMP error");
+					break;
+				case SIPSAK_ERR_ICMP6:
+					get_last_icmp(&connection, &icmp_type, &icmp_code);
+					printf("Recieved ICMP6 error: type: %u, code: %u\n", icmp_type, icmp_code);
+					exit_code(3, __PRETTY_FUNCTION__, "recieved ICMP error");
+					break;
+				default:
+					if (options->mode == SM_USRLOC ||
+            		options->mode == SM_USRLOC_INVITE ||
+            		options->mode == SM_USRLOC_MESSAGE) {
+						printf("failed\n");
+					}
+					print_err("error receiving", err);
+					exit_code(3, __PRETTY_FUNCTION__, "error recieving");
+					break;
+			}
+
+			num_read = 0;
+
+			if (usrlocstep == INV_OK_RECV) {
+				swap_ptr(&response, &request);
+			}
+			/* send ACK for non-provisional reply on INVITE */
+			if ((STRNCASECMP(request, "INVITE", 6)==0) && 
+					(regexec(&(regexps.replyexp), received, 0, 0, 0) == REG_NOERROR) && 
+					(regexec(&(regexps.proexp), received, 0, 0, 0) == REG_NOMATCH)) { 
+				build_ack(request, received, response, &regexps);
+				dontsend = 0;
+				inv_trans = 0;
+				/* lets fire the ACK to the server */
+				send_message(response, &connection, &counters, &timers);
+				inv_trans = 1;
+			}
+			/* check for old CSeq => ignore retransmission */
+			cseqtmp = get_cseq(received);
+			if ((0 < cseqtmp) && (cseqtmp < msg_data.cseq_counter)) {
+				if (verbose>0) {
+					printf("ignoring retransmission\n");
 				}
-				else if (options->mode == SM_RANDTRASH) {
-					handle_randtrash(options->warning_ext, &counters, &msg_data, &regexps);
-				}
-				else {
-					handle_default(&regexps, &counters, &timers, &connection, &delays,
-              &msg_data);
-				} /* redirect, auth, and modes */
-			} /* ret > 0 */
-			else if (ret == -1) { // we did not got anything back, send again
-				/* no re-transmission on reliable transports */
-				if (connection.transport != SIP_UDP_TRANSPORT) {
-					connection.dontsend = 1;
-				}
+				counters.retrans_r_c++;
+				dontsend = 1;
 				continue;
 			}
-			else if (ret == -2) { // we received non-matching ICMP
-				connection.dontsend = 1;
+			else if (regexec(&(regexps.authexp), received, 0, 0, 0) == REG_NOERROR) {
+				if (!msg_data.username && !options->auth_username) {
+					if (timers.timing > 0) {
+						timers.timing--;
+						counters.run++;
+						if (timers.timing == 0) {
+							printf("%.3f/%.3f/%.3f ms\n", delays.small_delay, delays.all_delay / counters.run, delays.big_delay);
+							exit_code(0, __PRETTY_FUNCTION__, NULL);
+						}
+						msg_data.cseq_counter = new_transaction(request, response);
+						delays.retryAfter = timers.timer_t1;
+						continue;
+					}
+					fprintf(stderr, "%s\nerror: received 40[17] but cannot "
+						"authentication without a username or auth username\n", received);
+					log_message(request);
+					exit_code(2, __PRETTY_FUNCTION__, "missing username for authentication");
+				}
+				/* prevents a strange error */
+				regcomp(&(regexps.authexp), "^SIP/[0-9]\\.[0-9] 40[17] ", REG_EXTENDED|REG_NOSUB|REG_ICASE);
+				insert_auth(request, received, msg_data.username, options->password,
+            	options->auth_username, options->authhash, counters.namebeg,
+             	counters.nameend);
+				if (verbose > 2)
+					printf("\nreceived:\n%s\n", received);
+				msg_data.cseq_counter = new_transaction(request, response);
 				continue;
+			} /* if auth...*/
+				/* lets see if received a redirect */
+			if (options->redirects == 1 && regexec(&(regexps.redexp), received, 0, 0, 0) == REG_NOERROR) {
+				handle_3xx(&connection, &msg_data, options->warning_ext, options->outbound_proxy, options->domainname, options->ignore_ca_fail);
+			} /* if redircts... */
+			else if (options->mode == SM_TRACE) {
+				trace_reply(&regexps, &counters, &timers, &connection, &delays, &msg_data, &dontsend);
+			} /* if trace ... */
+			else if (options->mode == SM_USRLOC ||
+                options->mode == SM_USRLOC_INVITE ||
+                options->mode == SM_USRLOC_MESSAGE ||
+                options->mode == SM_INVITE ||
+                options->mode == SM_MESSAGE) {
+
+				handle_usrloc(&regexps, &counters,
+                    options->rand_rem, msg_data.username,
+                    options->nagios_warn, &timers, msg_data.mes_body,
+                    options->mode, &connection, &delays, &msg_data, &dontsend);
+			}
+			else if (options->mode == SM_RANDTRASH) {
+				handle_randtrash(options->warning_ext, &counters, &msg_data, &regexps);
 			}
 			else {
-				if (options->mode == SM_USRLOC ||
-            options->mode == SM_USRLOC_INVITE ||
-            options->mode == SM_USRLOC_MESSAGE) {
-					printf("failed\n");
-				}
-				perror("socket error");
-				exit_code(3, __PRETTY_FUNCTION__, "internal socket error");
-			}
+				handle_default(&regexps, &counters, &timers, &connection, &delays, &msg_data, &dontsend);
+			} /* redirect, auth, and modes */
 		} /* !flood */
 		else {
 			if (counters.send_counter == 1) {

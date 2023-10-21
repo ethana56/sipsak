@@ -19,6 +19,7 @@
 
 #include "sipsak.h"
 #include "shoot.h"
+#include "error.h"
 
 #include <time.h>
 #ifdef HAVE_SYS_TIME_H
@@ -27,6 +28,14 @@
 #ifdef HAVE_SYS_SOCKET_H
 # include <sys/socket.h>
 #endif
+
+#define NO_IP_PREF 0
+#define PREF_IPV4  1
+#define PREF_IPV6  2
+
+#define IPV4 0
+#define IPV6 1
+
 
 struct sipsak_sr_time {
 	struct timeval sendtime;
@@ -41,19 +50,23 @@ struct sipsak_sr_time {
 };
 
 struct sipsak_con_data {
-	struct sockaddr_in adr;
-	unsigned int transport;
-	unsigned long address;
+	union sipsak_sockaddr from_adr;
+	union sipsak_sockaddr to_adr;
+	socklen_t from_adr_len;
+	socklen_t to_adr_len;
+	int transport;
+	struct sipsak_address *addresses;
+	size_t num_addresses, cur_address;
 	int csock;
 	int usock;
-	int dontsend;
 	int dontrecv;
 	int connected;
 	int symmetric;
-	int lport;
-	int rport;
+	in_port_t lport;
+	in_port_t rport;
 	char *buf_tmp;
 	int buf_tmp_size;
+	unsigned short last_icmp_type, last_icmp_code;
 };
 
 struct sipsak_counter {
@@ -75,27 +88,23 @@ struct sipsak_delay {
 
 extern char *transport_str;
 
-void init_network(struct sipsak_con_data *cd, char *local_ip
-#ifdef WITH_TLS_TRANSP
-    , char *ca_file
-#endif
-    );
+void set_addresses(struct sipsak_con_data *cd, struct sipsak_address *addresses, size_t num_addresses);
+
+struct sipsak_address const *get_cur_address(struct sipsak_con_data *cd);
+
+sipsak_err init_network(struct sipsak_con_data *cd, char const *local_ip, char const *ca_file);
+
+sipsak_err resolve_str(char const *address, char *buf, size_t buf_len);
+
+sipsak_err get_local_address_str(struct sipsak_con_data *cd, char *buf, size_t buf_len, int *ip_type);
 
 void shutdown_network();
 
-void send_message(char* mes, struct sipsak_con_data *cd,
-			struct sipsak_counter *sc, struct sipsak_sr_time *srt);
+sipsak_err send_message(char* mes, struct sipsak_con_data *cd, struct sipsak_counter *sc, struct sipsak_sr_time *srt);
 
-int recv_message(char *buf, int size, int inv_trans,
-			struct sipsak_delay *sd, struct sipsak_sr_time *srt,
-			struct sipsak_counter *count, struct sipsak_con_data *cd,
-			struct sipsak_regexp *reg, enum sipsak_modes mode, int cseq_counter,
-      char *request, char *response);
+void get_last_icmp(struct sipsak_con_data *cd, unsigned int *last_icmp_type, unsigned int *last_icmp_code);
 
-int set_target(struct sockaddr_in *adr, unsigned long target, int port,
-    int socket, int connected, unsigned int transport, char *domainname
-#ifdef WITH_TLS_TRANSP
-    , int ignore_ca_fail
-#endif
-    );
+sipsak_err recv_message(char *buf, size_t buf_size, int inv_trans, struct sipsak_delay *sd, struct sipsak_sr_time *srt, struct sipsak_counter *count, struct sipsak_con_data *cd, struct sipsak_regexp *reg, enum sipsak_modes mode, int cseq_counter, char *request, char *response, size_t *num_read);
+
+sipsak_err set_target(struct sipsak_con_data *con, char const *domainname, int ignore_ca_fail);
 #endif

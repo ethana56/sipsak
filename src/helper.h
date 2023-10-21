@@ -19,6 +19,7 @@
 #define SIPSAK_HELPER_H
 
 #include "sipsak.h"
+#include "error.h"
 
 #ifdef HAVE_SYS_TIME_H
 # include <sys/time.h>
@@ -54,13 +55,13 @@
 # define SRV_SIP_UDP "_sip._udp"
 #endif
 
-int is_ip(char *str);
+int is_ip(char const *str);
 
 unsigned long getaddress(char *host);
 
 unsigned long getsrvadr(char *host, int *port, unsigned int *transport);
 
-void get_fqdn(char *buf, int numeric, char *hostname);
+sipsak_err get_fqdn(char *buf, size_t buf_len);
 
 void replace_string(char *mes, char *search, char *replacement);
 
@@ -81,6 +82,22 @@ int is_number(char *number);
 int str_to_int(int mode, char *num);
 
 int read_stdin(char *buf, int size, int ret);
+
+int safe_strcpy(char *dst, size_t *dst_len, char const *src);
+
+char *cpy_str_alloc(char const *str);
+
+void construct_sipsak_address(struct sipsak_address *address, char const *address_str, int port);
+
+void destroy_sipsak_addresses(struct sipsak_address *addresses, size_t num_addresses);
+
+size_t get_addresses(struct sipsak_address **addresses, char const *domain, unsigned int port, int *transport);
+
+char const *sipsak_address_stringify(struct sipsak_address const *address);
+
+unsigned int read_big_endian_16(unsigned char const *buf);
+
+void *safe_malloc(size_t size);
 
 void *str_alloc(size_t size);
 

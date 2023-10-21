@@ -18,6 +18,10 @@ void exit_code(int code, const char *function, const char *reason) {
       code, function, reason);
 };
 
+char const* chk_null_str(char const* str) {
+	return str ? str : "<NULL>";
+}
+
 START_TEST (test_get_cl) {
 	/* failure cases */
 	ck_assert_msg(get_cl("") == -1, "get_cl(\"\") returned %d, instead of -1", get_cl(""));
@@ -46,6 +50,60 @@ START_TEST (test_find_lr_parameter) {
 }
 END_TEST
 
+START_TEST(test_parse_uri) {
+	char uri[100], *cur_uri;
+	char *scheme, *user, *host;
+	int port = 0;
+
+	char *msg_str = "parse_uri(\"%s\") returned \"%s\", \"%s\", \"%s\", \"%d\"";
+
+	cur_uri = "sip:username@127.0.0.1:5060";
+	strcpy(uri, cur_uri);
+	parse_uri(uri, &scheme, &user, &host, &port);
+	ck_assert_msg(strcmp(chk_null_str(scheme), "sip") == 0 && strcmp(chk_null_str(user), "username") == 0 && strcmp(chk_null_str(host), "127.0.0.1") == 0 && port == 5060, msg_str, cur_uri, chk_null_str(scheme), chk_null_str(user), chk_null_str(host), port);
+
+	cur_uri = "sip:username@[::0]:5060";
+	strcpy(uri, cur_uri);
+	parse_uri(uri, &scheme, &user, &host, &port);
+	ck_assert_msg(strcmp(chk_null_str(scheme), "sip") == 0 && strcmp(chk_null_str(user), "username") == 0 && strcmp(chk_null_str(host), "::0") == 0 && port == 5060, msg_str, cur_uri, chk_null_str(scheme), chk_null_str(user), chk_null_str(host), port);
+
+	cur_uri = "username@[::0]:5060";
+	strcpy(uri, cur_uri);
+	parse_uri(uri, &scheme, &user, &host, &port);
+	ck_assert_msg(scheme == NULL && strcmp(chk_null_str(user), "username") == 0 && strcmp(chk_null_str(host), "::0") == 0 && port == 5060, msg_str, cur_uri, chk_null_str(scheme), chk_null_str(user), chk_null_str(host), port);
+
+	cur_uri = "username@[::0]";
+	strcpy(uri, cur_uri);
+	parse_uri(uri, &scheme, &user, &host, &port);
+	ck_assert_msg(scheme == NULL && strcmp(chk_null_str(user), "username") == 0 && strcmp(chk_null_str(host), "::0") == 0 && port == 0, msg_str, cur_uri, chk_null_str(scheme), chk_null_str(user), chk_null_str(host), port);
+
+	cur_uri = "username@[::0]:5060";
+	strcpy(uri, cur_uri);
+	parse_uri(uri, &scheme, &user, &host, &port);
+	ck_assert_msg(scheme == NULL && strcmp(chk_null_str(user), "username") == 0 && strcmp(chk_null_str(host), "::0") == 0 && port == 5060, msg_str, cur_uri, chk_null_str(scheme), chk_null_str(user), chk_null_str(host), port);
+
+	cur_uri = "[::0]:5060";
+	strcpy(uri, cur_uri);
+	parse_uri(uri, &scheme, &user, &host, &port);
+	ck_assert_msg(scheme == NULL && user == NULL && strcmp(chk_null_str(host), "::0") == 0 && port == 5060, msg_str, cur_uri, chk_null_str(scheme), chk_null_str(user), chk_null_str(host), port);
+
+	cur_uri = "127.0.0.1:5060";
+	strcpy(uri, cur_uri);
+	parse_uri(uri, &scheme, &user, &host, &port);
+	ck_assert_msg(scheme == NULL && user == NULL && strcmp(chk_null_str(host), "127.0.0.1") == 0 && port == 5060, msg_str, cur_uri, chk_null_str(scheme), chk_null_str(user), chk_null_str(host), port);
+
+	cur_uri = "sip:[::0]:5080";
+	strcpy(uri, cur_uri);
+	parse_uri(uri, &scheme, &user, &host, &port);
+	ck_assert_msg(strcmp(chk_null_str(scheme), "sip") == 0 && user == NULL && strcmp(chk_null_str(host), "::0") == 0 && port == 5080, msg_str, cur_uri, chk_null_str(scheme), chk_null_str(user), chk_null_str(host), port);
+
+	cur_uri = "sip:127.0.0.1:5060";
+	strcpy(uri, cur_uri);
+	parse_uri(uri, &scheme, &user, &host, &port);
+	ck_assert_msg(strcmp(chk_null_str(scheme), "sip") == 0 && user == NULL && strcmp(chk_null_str(host), "127.0.0.1") == 0 && port == 5060, msg_str, cur_uri, chk_null_str(scheme), chk_null_str(user), chk_null_str(host), port);
+}
+END_TEST
+
 START_TEST (test_get_cseq) {
 	/* failure cases */
 	ck_assert_msg(get_cseq("") == 0, "get_cseq(\"\") returned %d, instead of 0", find_lr_parameter(""));
@@ -69,6 +127,9 @@ Suite *header_f_suite(void) {
 	/* find_lr_parameter test case */
 	TCase *tc_find_lr_parameter = tcase_create("find_lr_parameter");
 	tcase_add_test(tc_find_lr_parameter, test_find_lr_parameter);
+	/* parse_uri test case */
+	TCase *tc_parse_uri = tcase_create("parse_uri");
+	tcase_add_test(tc_parse_uri, test_parse_uri);
 	/* get_cseq test case */
 	TCase *tc_get_cseq = tcase_create("get_cseq");
 	tcase_add_test(tc_get_cseq, test_get_cseq);
@@ -76,6 +137,7 @@ Suite *header_f_suite(void) {
 	/* add test cases to suite */
 	suite_add_tcase(s, tc_get_cl);
 	suite_add_tcase(s, tc_find_lr_parameter);
+	suite_add_tcase(s, tc_parse_uri);
 	suite_add_tcase(s, tc_get_cseq);
 
 	return s;

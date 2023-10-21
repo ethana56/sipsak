@@ -247,7 +247,7 @@ int main(int argc, char *argv[])
 	FILE	*pf;
 	char	buff[BUFSIZE];
 	int		c, i, port;
-	unsigned int tsp;
+	int tsp;
 	char	*scheme, *user, *host, *backup;
 	pid_t 	pid;
 	struct 	timespec ts;
@@ -613,7 +613,10 @@ int main(int argc, char *argv[])
 					fprintf(stderr, "error: missing in host in outbound proxy\n");
 					exit_code(2, __PRETTY_FUNCTION__, "missing host in outbound proxy");
 				}
-				if (is_ip(host)) {
+				options.num_addresses = get_addresses(&options.addresses, host, port, &tsp);
+				if (options.transport == 0) options.transport = tsp;
+
+				/*if (is_ip(host)) {
 					options.address = getaddress(host);
 					if (options.transport == 0)
 						options.transport = SIP_UDP_TRANSPORT;
@@ -621,10 +624,9 @@ int main(int argc, char *argv[])
 				else {
 					if (!port) {
 						options.address = getsrvadr(host, &options.rport, &tsp);
-						if (tsp != 0)
-							options.transport = tsp;
+						if (tsp != 0) options.transport = tsp;
 					}
-					if (!options.address) {
+					if (!options.addresses) {
 						options.address = getaddress(host);
 						if (options.address && verbose > 1)
 							printf("using A record: %s\n", host);
@@ -637,7 +639,7 @@ int main(int argc, char *argv[])
 				}
 				if (port && !options.rport) {
 					options.rport = port;
-				}
+				}*/
 				options.outbound_proxy=1;
 #ifdef DEBUG
 				printf("address: %lu, rport: %i\n", options.address, options.rport);
@@ -697,10 +699,14 @@ int main(int argc, char *argv[])
 					fprintf(stderr, "error: missing hostname in SIP URI\n");
 					exit_code(2, __PRETTY_FUNCTION__, "missing host name in target URI");
 				}
-				if (port && !options.rport) {
-					options.rport = port;
+				//if (port && !options.rport) {
+				//	options.rport = port;
+				//}
+				if (!options.addresses) {
+					options.num_addresses = get_addresses(&options.addresses, options.domainname, port, &options.transport);
+					if (options.transport == 0) options.transport = tsp;
 				}
-				if (is_ip(options.domainname) && !options.address) {
+				/*if (is_ip(options.domainname) && !options.addresses) {
 					options.address = getaddress(options.domainname);
 					if (options.transport == 0)
 						options.transport = SIP_UDP_TRANSPORT;
@@ -711,7 +717,7 @@ int main(int argc, char *argv[])
 						if (tsp != 0 && options.transport == 0)
 							options.transport = tsp;
 					}
-					if (!options.address) {
+					if (!options.addresses) {
 						options.address = getaddress(options.domainname);
 						if (options.address && verbose > 1)
 							printf("using A record: %s\n", options.domainname);
@@ -726,7 +732,7 @@ int main(int argc, char *argv[])
 					snprintf(backup, strlen(options.domainname)+6, "%s:%i",
                    options.domainname, port);
 					options.domainname = backup;
-				}
+				}*/
 				options.uri_b=1;
 #ifdef DEBUG
 				printf("address: %lu, rport: %i, username: '%s', domain: '%s'\n", options.address, options.rport, options.username, options.domainname);
@@ -832,13 +838,13 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (options.rport == 0) {
-		options.rport = 5060;
-	}
-	if (options.rport > 65535 || options.rport <= 0) {
-		fprintf(stderr, "error: invalid remote port: %i\n", options.rport);
-		exit_code(2, __PRETTY_FUNCTION__, "remote port out of range");
-	}
+	//if (options.rport == 0) {
+	//	options.rport = 5060;
+	//}
+	//if (options.rport > 65535 || options.rport <= 0) {
+	//	fprintf(stderr, "error: invalid remote port: %i\n", options.rport);
+	//	exit_code(2, __PRETTY_FUNCTION__, "remote port out of range");
+	//}
 	if (options.transport == 0) {
 		options.transport = SIP_UDP_TRANSPORT;
 	}
