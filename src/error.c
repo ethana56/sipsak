@@ -42,7 +42,11 @@ char const *sipsak_strerror(sipsak_err err) {
         case SIPSAK_ERR_ADDR_FAMILY:
             return "the address family is not support";
         case SIPSAK_ERR_RES_UNKNOWN:
-            return "error resolving address";
+            return "error resolving address or finding domain name";
+        case SIPSAK_ERR_IP:
+            return "invalid ip address";
+        case SIPSAK_ERR_IP_TYPE_MISMATCH:
+            return "provided ip address type doesn't match specified ip type";
         case SIPSAK_ERR_GAI_BAD_FLAGS:
             return "unsupported getaddrinfo flags";
         case SIPSAK_ERR_NO_IP:

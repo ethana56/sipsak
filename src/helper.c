@@ -70,6 +70,10 @@
 #endif
 
 
+char const *create_uri_hostname(char const *hostname, size_t hostname_len) {
+
+}
+
 char const *ip_to_str(struct sockaddr *adr, char *buf, size_t buf_len) {
 	char const *res;
 	switch (adr->sa_family) {
@@ -474,6 +478,14 @@ unsigned long getsrvadr(char *host, int *port, unsigned int *transport) {
 #endif // HAVE_SRV
 	return adr;
 }
+
+
+sipsak_err get_local_fqdn(char *buf, size_t buf_len) {
+	
+
+	return SIPSAK_ERR_SUCCESS;
+}
+
 /* because the full qualified domain name is needed by many other
    functions it will be determined by this function.
 */
@@ -782,49 +794,6 @@ char *cpy_str_alloc(char const *str) {
 	new_str = safe_malloc(len + 1);
 	strcpy(new_str, str);
 	return new_str;
-}
-
-void construct_sipsak_address(struct sipsak_address *address, char const *address_str, int port) {
-	if (port == 0) {
-		address->port = 5060;
-	} else if (port < 0 || port > 65535) {
-		fprintf(stderr, "port %d is out of range.", port);
-		exit_code(2, __PRETTY_FUNCTION__, "port is out of range");
-	} else {
-		address->port = port;
-	}
-	address->address = cpy_str_alloc(address_str);
-}
-
-void destroy_sipsak_address(struct sipsak_address *address) {
-	free(address->address);
-	address->address = NULL;
-	address->port = 0;
-}
-
-void destroy_sipsak_addresses(struct sipsak_address *addresses, size_t num_addresses) {
-	size_t i;
-	for (i = 0; i < num_addresses; ++i) {
-		destroy_sipsak_address(&addresses[i]);
-	}
-	free(addresses);
-}
-
-static size_t create_address_no_lookup(struct sipsak_address **address, char const *host, unsigned int port) {
-	*address = safe_malloc(sizeof(struct sipsak_address));
-	construct_sipsak_address(*address, host, port);
-	return 1;
-}
-
-size_t get_addresses(struct sipsak_address **addresses, char const *host, unsigned int port, int *transport) {
-	size_t num_addresses = 0;
-	if (!is_ip(host) && !port) {
-		/*num_addresses = getsrvaddress(addresses, host, transport);*/
-	}
-	if (num_addresses == 0) {
-		num_addresses = create_address_no_lookup(addresses, host, port);
-	}
-	return num_addresses;
 }
 
 char const *sipsak_address_stringify(struct sipsak_address const *address) {

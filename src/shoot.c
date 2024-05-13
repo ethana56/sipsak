@@ -85,33 +85,83 @@ static inline void create_usern(char *target, char *username, int number)
 	}
 }
 
-static char *create_msg_domainname(char const *domainname, unsigned int port) {
-	size_t domainname_len;
+static char *create_domainname(char const *domainname, size_t domainname_len, unsigned int port) {
+	size_t alloc_len = 1;
 	char *result;
-	domainname_len = strlen(domainname);
-	result = str_alloc(domainname_len + 1 + 6);
-	snprintf(result, domainname_len + 6, "%s:%u", domainname, port);
-	return result;
-}
 
-static sipsak_err select_address(struct sipsak_con_data *cd, char const *domainname, int ignore_ca_fail) {
-	sipsak_err err;
+	size_t port_str_len;
+	char port_str[6];
 
-	while ((err = set_target(cd, domainname, ignore_ca_fail)) != SIPSAK_ERR_EOF) {
-		if (err == SIPSAK_ERR_SUCCESS) {
-			break;
-		}
-		if (check_errno(err)) {
-			fprintf(stderr, "failed to connect to: %s: %s: %s\n", 
-				sipsak_address_stringify(get_cur_address(cd)), 
-				sipsak_strerror(err), 
-				strerror(errno));
+	alloc_len += domainname_len;
+
+	if (port) {
+		port_str_len = snprintf(port_str, sizeof(port_str), "%u", port);
+		alloc_len += (port_str_len + 1);
+	}
+	
+	if (is_ip_type(domainname, SIPSAK_IPV6)) {
+		alloc_len += 2;
+		result = safe_malloc(alloc_len);
+		if (port) {
+			(void)snprintf(result, alloc_len, "[%s]:%s", domainname, port_str);
 		} else {
-			fprintf(stderr, "failed to connect to: %s: %s\n", sipsak_address_stringify(get_cur_address(cd)), sipsak_strerror(err));
+			(void)snprintf(result, alloc_len, "[%s]", domainname);
+		}
+	} else {
+		result = safe_malloc(alloc_len);
+		if (port) {
+			(void)snprintf(result, alloc_len, "%s:%s", domainname, port_str);
+		} else {
+			(void)snprintf(result, alloc_len, "%s", domainname);
 		}
 	}
 
-	return err;
+	return result;
+}
+
+void construct_sipsak_address(struct sipsak_address *address, char const *address_str, int port, int transport, int ip_type) {
+	if (port == 0) {
+		address->port = 5060;
+	} else if (port < 0 || port > 65535) {
+		fprintf(stderr, "port %d is out of range.", port);
+		exit_code(2, __PRETTY_FUNCTION__, "port is out of range");
+	} else {
+		address->port = port;
+	}
+	address->address = cpy_str_alloc(address_str);
+	address->transport = transport;
+	address->ip_type = ip_type;
+}
+
+void destroy_sipsak_address(struct sipsak_address *address) {
+	free(address->address);
+	address->address = NULL;
+	address->port = 0;
+}
+
+void destroy_sipsak_addresses(struct sipsak_address *addresses, size_t num_addresses) {
+	size_t i;
+	for (i = 0; i < num_addresses; ++i) {
+		destroy_sipsak_address(&addresses[i]);
+	}
+	free(addresses);
+}
+
+static size_t create_address_no_lookup(struct sipsak_address **address, char const *host, unsigned int port, int transport, int ip_type) {
+	*address = safe_malloc(sizeof(struct sipsak_address));
+	construct_sipsak_address(*address, host, port, transport, ip_type);
+	return 1;
+}
+
+size_t get_addresses(struct sipsak_address **addresses, char const *host, unsigned int port, int transport, int ip_type) {
+	size_t num_addresses = 0;
+	if (!is_ip(host) && !port) {
+		/*num_addresses = getsrvaddress(addresses, host, transport)*/
+	}
+	if (num_addresses == 0) {
+		num_addresses = create_address_no_lookup(addresses, host, port, transport, ip_type);
+	}
+	return num_addresses;
 }
 
 /* Tries to take care of a redirection */
@@ -120,12 +170,15 @@ static void handle_3xx(struct sipsak_con_data *con,
 	int warning_ext,
 	int outbound_proxy,
 	char *domainname,
+	int ip_type,
 	int ignore_ca_fail
 )
 {
 
+	sipsak_err err;
+
 	struct sipsak_address *addresses;
-	size_t num_addresses;
+	size_t num_addresses, cur_address_index;
 	
 	char *uscheme, *uuser, *uhost, *contact;
 	int uport;
@@ -152,14 +205,16 @@ static void handle_3xx(struct sipsak_con_data *con,
 		return;
 	}
 	parse_uri(contact, &uscheme, &uuser, &uhost, &uport);
-	num_addresses = get_addresses(&addresses, uhost, uport, &con->transport); /* TODO: decide if user provided transport should override this*/
-	set_addresses(con, addresses, num_addresses); 
-	if (select_address(con, domainname, ignore_ca_fail) < 0) {
-		fprintf(stderr, "cannot find good ip address in the domain %s\n", uhost);
-		exit_code(2, __PRETTY_FUNCTION__, "cannot find valid domain");
+	num_addresses = get_addresses(&addresses, uhost, uport, con->transport, ip_type); /* TODO: decide if user provided transport should override this*/
+
+	for (cur_address_index = 0; cur_address_index < num_addresses; ++cur_address_index) {
+		
 	}
+
+	free(addresses);
 	free(message->domainname);
-	message->domainname = create_msg_domainname(get_cur_address(con)->address, get_cur_address(con)->port);
+
+	message->domainname = create_domainname(get_cur_address(con)->address, strlen(get_cur_address(con)->address), get_cur_address(con)->port);
 	free(contact);
 }
 
@@ -833,42 +888,29 @@ void before_sending(struct sipsak_counter *counter, struct sipsak_msg_data *msg_
 
 static void print_err(char const *msg, sipsak_err err) {
 	if (check_errno(err)) {
+		printf("ERRNO CODE: %d\n", errno);
 		fprintf(stderr, "%s: %s: %s\n", msg, sipsak_strerror(err), strerror(errno));
 	} else {
 		fprintf(stderr, "%s: %s\n", msg, sipsak_strerror(err));
 	}
 }
 
-static sipsak_err get_local_address_for_uri(char *buf, size_t buf_len, struct sipsak_con_data *cd, int numeric, char const *hostname) {
-	sipsak_err err = SIPSAK_ERR_SUCCESS;
-
-	char ip_buf[46];
-	int ip_type;
-
-	if (numeric && hostname) {
-		err = resolve_str(hostname, buf, buf_len);
-	} else if (hostname) {
-		if (snprintf(buf, buf_len, "%s", hostname) >= buf_len) {
-			err = SIPSAK_ERR_BUFLEN;
-		}
-	} else if (numeric) {
-		err = get_local_address_str(cd, ip_buf, sizeof(ip_buf), &ip_type);
-
-		if (err == SIPSAK_ERR_SUCCESS) {
-			if (ip_type == IPV6) {
-				if (snprintf(buf, buf_len, "[%s]", ip_buf) >= buf_len) {
-					err = SIPSAK_ERR_BUFLEN;
-				}
-			} else {
-				if (snprintf(buf, buf_len, "%s", ip_buf) >= buf_len) {
-					err = SIPSAK_ERR_BUFLEN;
-				}
-			}
-		}
+static sipsak_err alloc_local_address_str(struct sipsak_con_data const *cd, int numeric, char **result) {
+	sipsak_err err;
+	*result = NULL;
+	if (numeric) {
+		*result = safe_malloc(48);
+		err = get_local_ip_str(cd, *result, 48);
+		if (err != SIPSAK_ERR_SUCCESS) goto err;
 	} else {
-		err = get_fqdn(buf, buf_len);
+		*result = safe_malloc(FQDN_SIZE);
+		err = get_local_domainname_str(cd, *result, FQDN_SIZE);
+		if (err != SIPSAK_ERR_SUCCESS) goto err;
 	}
+	return SIPSAK_ERR_SUCCESS;
 
+err:
+	if (*result != NULL) free(*result);
 	return err;
 }
 
@@ -879,21 +921,26 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 
 	size_t recv_amt, num_read = 0;
 
+	size_t cur_address_index, num_addresses;
+
 	unsigned int icmp_type, icmp_code;
 
 	struct timespec sleep_ms_s, sleep_rem;
 	int cseqtmp, rand_tmp;
 	char buf2[BUFSIZE], buf3[BUFSIZE], lport_str[LPORT_STR_LEN];
-  char fqdn[FQDN_SIZE];
 
-  struct sipsak_counter counters;
-  struct sipsak_sr_time timers;
-  struct sipsak_con_data connection;
-  struct sipsak_delay delays;
-  struct sipsak_msg_data msg_data;
-  struct sipsak_regexp regexps;
+	char *local_address_buf;
 
-  int dontsend = 0;
+  	struct sipsak_counter counters;
+  	struct sipsak_sr_time timers;
+  	struct sipsak_con_data connection;
+  	struct sipsak_delay delays;
+  	struct sipsak_msg_data msg_data;
+  	struct sipsak_regexp regexps;
+
+	//int ip_type;
+
+  	int dontsend = 0;
 
 	inv_trans = 0;
 	usrlocstep = REG_REP;
@@ -906,21 +953,20 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 	memset(buf2, 0, BUFSIZE);
 	memset(buf3, 0, BUFSIZE);
 	memset(lport_str, 0, LPORT_STR_LEN);
-	memset(fqdn, 0, FQDN_SIZE);
 
-  /* initialize external vars which don't have initializer */
-  nonce_count = 0;
+  	/* initialize external vars which don't have initializer */
+  	nonce_count = 0;
 
 	counters.namebeg = options->namebeg;
 	counters.nameend = options->nameend;
 
-	connection.csock = connection.usock = -1;
-	connection.transport = options->transport;
-	set_addresses(&connection, options->addresses, options->num_addresses);
-	connection.symmetric = options->symmetric;
-	connection.lport = options->lport;
-	connection.rport = options->rport;
-	connection.buf_tmp = NULL;
+	//connection.csock = connection.usock = -1;
+	//connection.transport = optcions->transport;
+	//set_addresses(&connection, options->addresses, options->num_addresses);
+	//connection.symmetric = options->symmetric;
+	//connection.lport = options->lport;
+	//connection.rport = options->rport;
+	//connection.buf_tmp = NULL;
 
 	memset(&(timers.sendtime), 0, sizeof(timers.sendtime));
 	memset(&(timers.recvtime), 0, sizeof(timers.recvtime));
@@ -959,45 +1005,51 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 	msg_data.from_uri = options->from_uri;
 	msg_data.mes_body = options->mes_body;
 	msg_data.headers = options->headers;
-	msg_data.fqdn = fqdn;
 
-	err = init_network(&connection, options->local_ip, options->ca_file);
-	if (err != SIPSAK_ERR_SUCCESS) {
-		print_err("error initializing sockets", err);
-		exit_code(2, __PRETTY_FUNCTION__, "error initializing network");
+	struct sipsak_address *addresses;
+
+	num_addresses = get_addresses(&addresses, options->remote_host, options->remote_port, options->transport, options->ip_type);
+
+	for (cur_address_index = 0; cur_address_index < num_addresses; ++cur_address_index) {
+		err = init_network(&connection, &addresses[cur_address_index], options->local_ip, options->lport, options->symmetric, options->ca_file);
+		if (err == SIPSAK_ERR_SUCCESS) break;
+
+		printf("The address: %s\n", addresses[cur_address_index].address);
+		print_err("Error creating socket. Moving to next address...", err);
+	}
+	if (cur_address_index >= num_addresses) {
+		fprintf(stderr, "Error creating sockets.\n");
+		exit_code(2, __PRETTY_FUNCTION__, "error creating sockets");
 	}
 
 	msg_data.lport = connection.lport;
 
-	err = select_address(&connection, options->domainname, options->ignore_ca_fail);
+	msg_data.domainname = create_domainname(options->domainname, strlen(options->domainname), connection.rport);
+
 	if (err != SIPSAK_ERR_SUCCESS) {
-		fprintf(stderr, "cannot find a good ip address in the domain: %s\n", options->domainname);
-		exit_code(2, __PRETTY_FUNCTION__, "cannot find a good ip address in the domain");
+		print_err("error creating domainname", err);
+		exit_code(2, __PRETTY_FUNCTION__, "error creating domainname");
 	}
 
-	msg_data.domainname = create_msg_domainname(options->domainname, connection.rport);
-	/* msg_data.domainname = options->domainname; */
-	
-  /*if (msg_data.lport == 0) {
-	printf("SETTING THE PORT TO 0!!!!!!!\n");
-    msg_data.lport = connection.lport;
-  }*/
-
-	/* determine our hostname */
-
-	err = get_local_address_for_uri(fqdn, sizeof(fqdn), &connection, options->numeric, options->hostname);
-	if (err != SIPSAK_ERR_SUCCESS) {
-		print_err("Error getting fqdn", err);
-		exit_code(3, __PRETTY_FUNCTION__, "error getting fqdn");
+	if (options->local_ip != NULL) {
+		size_t local_ip_cpy_len = strlen(options->local_ip) + 1;
+		msg_data.fqdn = safe_malloc(local_ip_cpy_len);
+		memcpy(msg_data.fqdn, options->local_ip, local_ip_cpy_len);
+	} else {
+		err = alloc_local_address_str(&connection, options->numeric, &local_address_buf);
+		if (err != SIPSAK_ERR_SUCCESS) {
+			print_err("Error getting the local address for the FQDN", err);
+			exit_code(3, __PRETTY_FUNCTION__, "error getting fqdn");
+		}
 	}
 
 	if (verbose > 2) {
-		printf("fqdn: %s\n", fqdn);
+		printf("fqdn: %s\n", msg_data.fqdn);
 	}
 
 	if (options->replace_b == 1){
 		replace_string(request, "$dsthost$", options->domainname);
-		replace_string(request, "$srchost$", fqdn);
+		replace_string(request, "$srchost$", msg_data.fqdn);
 		sprintf(lport_str, "%i", connection.lport);
 		replace_string(request, "$port$", lport_str);
 		if (msg_data.username)
@@ -1233,7 +1285,7 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 			} /* if auth...*/
 				/* lets see if received a redirect */
 			if (options->redirects == 1 && regexec(&(regexps.redexp), received, 0, 0, 0) == REG_NOERROR) {
-				handle_3xx(&connection, &msg_data, options->warning_ext, options->outbound_proxy, options->domainname, options->ignore_ca_fail);
+				handle_3xx(&connection, &msg_data, options->warning_ext, options->outbound_proxy, options->domainname, options->ip_type, options->ignore_ca_fail);
 			} /* if redircts... */
 			else if (options->mode == SM_TRACE) {
 				trace_reply(&regexps, &counters, &timers, &connection, &delays, &msg_data, &dontsend);

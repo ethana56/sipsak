@@ -87,12 +87,6 @@ int safe_strcpy(char *dst, size_t *dst_len, char const *src);
 
 char *cpy_str_alloc(char const *str);
 
-void construct_sipsak_address(struct sipsak_address *address, char const *address_str, int port);
-
-void destroy_sipsak_addresses(struct sipsak_address *addresses, size_t num_addresses);
-
-size_t get_addresses(struct sipsak_address **addresses, char const *domain, unsigned int port, int *transport);
-
 char const *sipsak_address_stringify(struct sipsak_address const *address);
 
 unsigned int read_big_endian_16(unsigned char const *buf);

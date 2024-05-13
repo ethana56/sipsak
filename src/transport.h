@@ -33,9 +33,9 @@
 #define PREF_IPV4  1
 #define PREF_IPV6  2
 
-#define IPV4 0
-#define IPV6 1
-
+#define SIPSAK_IPAUTO 	0
+#define SIPSAK_IPV4 	1
+#define SIPSAK_IPV6 	2
 
 struct sipsak_sr_time {
 	struct timeval sendtime;
@@ -62,6 +62,7 @@ struct sipsak_con_data {
 	int dontrecv;
 	int connected;
 	int symmetric;
+	int ip_type;
 	in_port_t lport;
 	in_port_t rport;
 	char *buf_tmp;
@@ -88,15 +89,19 @@ struct sipsak_delay {
 
 extern char *transport_str;
 
+int is_ip_type(char const *ip_str, int ip_type);
+
 void set_addresses(struct sipsak_con_data *cd, struct sipsak_address *addresses, size_t num_addresses);
 
 struct sipsak_address const *get_cur_address(struct sipsak_con_data *cd);
 
-sipsak_err init_network(struct sipsak_con_data *cd, char const *local_ip, char const *ca_file);
+sipsak_err init_network(struct sipsak_con_data *cd, struct sipsak_address const *address, char const *local_ip, unsigned int lport, int symmetric, char const *ca_file);
 
-sipsak_err resolve_str(char const *address, char *buf, size_t buf_len);
+sipsak_err resolve_str(char const *address, char *buf, size_t buf_len, int *ip_type);
 
-sipsak_err get_local_address_str(struct sipsak_con_data *cd, char *buf, size_t buf_len, int *ip_type);
+sipsak_err get_local_ip_str(struct sipsak_con_data const *cd, char *buf, size_t buf_len);
+
+sipsak_err get_local_domainname_str(struct sipsak_con_data const *cd, char *buf, size_t buf_len);
 
 void shutdown_network();
 

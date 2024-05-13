@@ -104,6 +104,16 @@
 #include "error.h"
 #include "raw_packet.h"
 
+struct sipsak_sock_opts {
+	struct sockaddr const *remote_addr;
+	struct sockaddr const *local_addr;
+	socklen_t remote_addr_len;
+	socklen_t local_addr_len;
+	int family;
+	int socktype;
+	int protocol;
+};
+
 char *transport_str;
 char target_dot[INET6_ADDRSTRLEN], source_dot[INET6_ADDRSTRLEN];
 
@@ -580,6 +590,12 @@ void tls_dump_cert_info(char* s, X509* cert) {
 # endif /* USE_GNUTLS */
 #endif /* WITH_TLS_TRANSP */
 
+int is_ip_type(char const *ip_str, int ip_type) {
+	int family = (ip_type == SIPSAK_IPV4 ? AF_INET : AF_INET6);
+	unsigned char temp[16];
+	return inet_pton(family, ip_str, temp);
+}
+
 static in_port_t get_port(struct sockaddr const *adr) {
 	in_port_t res = 0;
 
@@ -599,7 +615,49 @@ static in_port_t get_port(struct sockaddr const *adr) {
 	return ntohs(res);
 }
 
-static sipsak_err resolve(char const *address, unsigned short port, int transport, int family, int binding, struct addrinfo **adrs) {
+static void sip_transport_to_sock_info(int sip_transport, int *socktype, int *protocol) {
+	switch (sip_transport) {
+		case SIP_UDP_TRANSPORT:
+			*socktype = SOCK_DGRAM;
+			*protocol = IPPROTO_UDP;
+			break;
+		case SIP_TLS_TRANSPORT:
+		case SIP_TCP_TRANSPORT:
+			*socktype = SOCK_STREAM;
+			*protocol = IPPROTO_TCP;
+			break;
+	}
+}
+
+//For converting IP strings to sipsak_sockaddr. If ip_str == NULL, then will call getaddrinfo and get wildcard address
+static sipsak_err convert_ip_str(char const *ip_str, unsigned int port, union sipsak_sockaddr *addr, socklen_t *addr_len) {
+	sipsak_err err;
+	struct addrinfo hints, *res;
+	int addrinfo_res;
+
+	char port_str[6];
+
+	memset(&hints, 0, sizeof(hints));
+
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_flags |= AI_NUMERICHOST;
+	
+	if (!ip_str) {
+		hints.ai_flags |= AI_PASSIVE;
+	}
+
+	(void)snprintf(port_str, sizeof(port_str), "%hu", port);
+	addrinfo_res = getaddrinfo(ip_str, port_str, &hints, &res);
+	if ((err = translate_gai_err(addrinfo_res)) != SIPSAK_ERR_SUCCESS) {
+		return err;
+	}
+	memcpy(addr, res->ai_addr, res->ai_addrlen);
+	*addr_len = res->ai_addrlen;
+	freeaddrinfo(res);
+	return SIPSAK_ERR_SUCCESS;
+}
+
+static sipsak_err resolve(char const *address, unsigned int port, int transport, int family, int binding, struct addrinfo **adrs) {
 	struct addrinfo hints;
 	int addrinfo_res;
 
@@ -607,61 +665,121 @@ static sipsak_err resolve(char const *address, unsigned short port, int transpor
 
 	memset(&hints, 0, sizeof(hints));
 
-	switch (transport) {
-		case SIP_UDP_TRANSPORT:
-			hints.ai_socktype = SOCK_DGRAM;
-			hints.ai_protocol = IPPROTO_UDP;
-			break;
-		case SIP_TLS_TRANSPORT:
-		case SIP_TCP_TRANSPORT:
-			hints.ai_socktype = SOCK_STREAM;
-			hints.ai_protocol = IPPROTO_TCP;
-			break;
-	}
-	//hints.ai_family = AF_INET;
+	sip_transport_to_sock_info(transport, &hints.ai_socktype, &hints.ai_protocol);
 	hints.ai_family = family;
 	hints.ai_flags = binding ? AI_PASSIVE : 0;
+	hints.ai_flags |= AI_UNUSABLE;
 
 	(void)snprintf(port_str, sizeof(port_str), "%hu", port);
 	addrinfo_res = getaddrinfo(address, port_str, &hints, adrs);
 	return translate_gai_err(addrinfo_res);
 }
 
-static sipsak_err adr_to_str(struct sockaddr *adr, int family, char *buf, size_t buf_len, int *ip_type) {
+static sipsak_err adr_to_str(struct sockaddr *addr, socklen_t addr_len, char *buf, size_t buf_len) {
+	int gai_res;
+
+	gai_res = getnameinfo(addr, addr_len, buf, buf_len, NULL, 0, NI_NUMERICHOST);
+	if (gai_res != 0) {
+		return translate_gai_err(gai_res);
+	}
+	
+	return SIPSAK_ERR_SUCCESS;
+}
+
+/*static sipsak_err adr_to_str(struct sockaddr *adr, int family, char *buf, size_t *buf_len, int *ip_type) {
 	char const *res;
+
 	switch (family) {
 		case AF_INET:
-			res = inet_ntop(AF_INET, &((struct sockaddr_in *)adr)->sin_addr, buf, buf_len);
-			*ip_type = IPV4;
+			res = inet_ntop(AF_INET, &((struct sockaddr_in *)adr)->sin_addr, buf, *buf_len);
+			*ip_type = SIPSAK_IPV4;
 			break;
 		case AF_INET6:
-			res = inet_ntop(AF_INET6, &((struct sockaddr_in6 *)adr)->sin6_addr, buf, buf_len);
-			*ip_type = IPV6;
+			res = inet_ntop(AF_INET6, &((struct sockaddr_in6 *)adr)->sin6_addr, buf, *buf_len);
+			*ip_type = SIPSAK_IPV6;
 			break;
 		default:
 			return SIPSAK_ERR_UNKNOWN_FAMILY;
 	}
 
-	return res ? SIPSAK_ERR_SUCCESS : SIPSAK_ERR_SYS;
-}
+	*buf_len = strlen(buf);
 
-sipsak_err resolve_str(char const *address, char *buf, size_t buf_len) {
+	return res ? SIPSAK_ERR_SUCCESS : SIPSAK_ERR_SYS;
+}*/
+
+sipsak_err resolve_str(char const *address, char *buf, size_t buf_len, int *ip_type) {
 	sipsak_err err = SIPSAK_ERR_SUCCESS;
 	struct addrinfo *res;
-
-	int ip_type;
 
 	err = resolve(address, 0, -1, 0, 0, &res);
 	if (err != SIPSAK_ERR_SUCCESS) {
 		return err;
 	}
 
-	err = adr_to_str(res->ai_addr, res->ai_family, buf, buf_len, &ip_type);
+	*ip_type = res->ai_family;
+	err = adr_to_str(res->ai_addr, res->ai_family, buf, buf_len); //, ip_type);
 	freeaddrinfo(res);
 	return err;
 }
 
-sipsak_err get_local_address_str(struct sipsak_con_data *cd, char *buf, size_t buf_len, int *ip_type) {
+static sipsak_err get_local_sockaddr(struct sipsak_con_data const *cd, union sipsak_sockaddr *addr) {
+	socklen_t addr_size = sizeof(*addr);
+
+	int sock;
+
+	if (cd->transport == SIP_UDP_TRANSPORT) {
+		sock = socket(cd->to_adr.adr.sa_family, SOCK_DGRAM, IPPROTO_UDP);
+		if (sock < 0) {
+			goto err;
+		}
+		if (connect(sock, (struct sockaddr *)&cd->to_adr, cd->to_adr_len) < 0) {
+			goto err;
+		}
+	} else {
+		sock = cd->csock;
+	}
+
+	if (getsockname(sock, (struct sockaddr *)addr, &addr_size) < 0) {
+		goto err;
+	}
+
+	if (sock != cd->csock) close(sock);
+
+	return SIPSAK_ERR_SUCCESS;
+
+err:
+	if (sock >= 0 && sock != cd->csock) close(sock);
+	return SIPSAK_ERR_SYS;
+}
+
+sipsak_err get_local_ip_str(struct sipsak_con_data const *cd, char *buf, size_t buf_len) {
+	sipsak_err err;
+
+	union sipsak_sockaddr addr;
+
+	err = get_local_sockaddr(cd, &addr);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		return err;
+	}
+
+	return adr_to_str((struct sockaddr *)&addr, sizeof(addr), buf, buf_len);
+}
+
+sipsak_err get_local_domainname_str(struct sipsak_con_data const *cd, char *buf, size_t buf_len) {
+	sipsak_err err;
+	int gai_res;
+
+	union sipsak_sockaddr addr;
+
+	err = get_local_sockaddr(cd, &addr);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		return err;
+	}
+	gai_res = getnameinfo((struct sockaddr *)&addr, sizeof(addr), buf, buf_len, NULL, 0, 0);
+	return translate_gai_err(gai_res);
+}
+
+/*sipsak_err get_local_address_str(struct sipsak_con_data *cd, char *buf, size_t *buf_len, int *ip_type) {
 	int temp_sock;
 	socklen_t adr_size;
 	union sipsak_sockaddr adr;
@@ -692,10 +810,26 @@ sipsak_err get_local_address_str(struct sipsak_con_data *cd, char *buf, size_t b
 	close(temp_sock);
 
 	return adr_to_str((struct sockaddr *)&adr, cd->from_adr.adr.sa_family, buf, buf_len, ip_type);
-}
+}*/
+
+/*static sipsak_err get_bound_socket(struct sockaddr *addr, socklen_t addr_len, int *sock, int socktype, int protocol) {
+	int errno_backup;
+	*sock = socket(addr->sa_family, socktype, protocol);
+	if (*sock < 0) {
+		return SIPSAK_ERR_SYS;
+	}
+	if (bind(*sock, addr, addr_len) < 0) {
+		errno_backup = errno;
+		close(*sock);
+		*sock = -1;
+		errno = errno_backup;
+		return SIPSAK_ERR_SYS;
+	}
+	return SIPSAK_ERR_SUCCESS;
+}*/
 
 
-static sipsak_err get_bound_socket(struct addrinfo *addrs, int *sock, union sipsak_sockaddr *sock_addr, socklen_t *addr_len) {
+/*static sipsak_err get_bound_socket(struct addrinfo *addrs, int *sock, union sipsak_sockaddr *sock_addr, socklen_t *addr_len) {
 	struct addrinfo *cur_addr;
 	int errno_backup;
 
@@ -715,22 +849,25 @@ static sipsak_err get_bound_socket(struct addrinfo *addrs, int *sock, union sips
 		}
 		errno_backup = errno;
 		close(*sock);
+		*sock = -1;
 		errno = errno_backup;
 	}
 	return cur_addr ? SIPSAK_ERR_SUCCESS : SIPSAK_ERR_NO_IP;
-}
+}*/
 
-static void get_socket_address(int socket, struct sockaddr *adr, socklen_t adr_len) {
+static sipsak_err get_socket_address(int socket, struct sockaddr *adr, socklen_t adr_len) {
+	sipsak_err err = SIPSAK_ERR_SUCCESS;
 	memset(adr, 0, adr_len);
 	if (getsockname(socket, adr, &adr_len) < 0) {
-		perror("getsockname error");
-		exit_code(2, __PRETTY_FUNCTION__, "getsockname error");
+		err = SIPSAK_ERR_SYS;
 	}
+	return err;
 }
 
 #ifdef RAW_SUPPORT
 static int create_raw_sock(sa_family_t family) {
 	int res = 1;
+	printf("CREATING RAW SOCKET!!!!!!!\n");
 	rawsock = socket(family, SOCK_DGRAM, family == AF_INET ? IPPROTO_ICMP : IPPROTO_ICMPV6);
 	if (rawsock < 0) {
 		if (verbose > 1) {
@@ -742,131 +879,405 @@ static int create_raw_sock(sa_family_t family) {
 }
 #endif
 
-static sipsak_err init_network_udp_non_symmetric(struct sipsak_con_data *cd, char const *local_ip) {
+static int translate_ip_type(int ip_type) {
+	int ip_family;
+
+	switch (ip_type) {
+	case SIPSAK_IPV4:
+		ip_family = AF_INET;
+		break;
+	case SIPSAK_IPV6:
+		ip_family = AF_INET6;
+		break;
+	case SIPSAK_IPAUTO:
+	default:
+		ip_family = AF_UNSPEC;
+		break;
+	}
+
+	return ip_family;
+}
+
+static sipsak_err get_socket(struct sipsak_sock_opts *opts, int *sock) {
 	int errno_backup;
 
-	sipsak_err err;
+	int sock_res = -1;
 
-	int created_raw_sock = 0;
-	struct addrinfo *res;
-
-	union sipsak_sockaddr listen_adr;
-
-	err = resolve(local_ip, cd->lport, cd->transport, PF_UNSPEC, 1, &res);
-	if (err != SIPSAK_ERR_SUCCESS) {
-		return err;
-	}
-
-	err = get_bound_socket(res, &cd->usock, &listen_adr, &cd->from_adr_len);
-	if (err != SIPSAK_ERR_SUCCESS) {
+	sock_res = socket(opts->family, opts->socktype, opts->protocol);
+	if (sock_res < 0) {
 		goto err;
 	}
-	freeaddrinfo(res);
-	get_socket_address(cd->usock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
 
-#ifdef RAW_SUPPORT
- 	created_raw_sock = create_raw_sock(listen_adr.adr.sa_family);
-#endif /* RAW_SUPPORT */
-
-	if (!created_raw_sock) {
-		/* Rather than PF_UNSPEC, this should probably be listen_adr.adr.family */
-		err = resolve(local_ip, 0, cd->transport, PF_UNSPEC, 1, &res);
-		if (err != SIPSAK_ERR_SUCCESS) {
-			return err;
-		}
-		err = get_bound_socket(res, &cd->csock, NULL, NULL);
-		if (err != SIPSAK_ERR_SUCCESS) {
+	if (opts->local_addr) {
+		if (bind(sock_res, opts->local_addr, opts->local_addr_len)) {
 			goto err;
 		}
-		freeaddrinfo(res);
 	}
-	cd->lport = get_port((struct sockaddr *)&cd->from_adr);
+	if (opts->remote_addr) {
+		if (connect(sock_res, opts->remote_addr, opts->remote_addr_len)) {
+			goto err;
+		}
+	}
+
+	*sock = sock_res;
 	return SIPSAK_ERR_SUCCESS;
 
 err:
 	errno_backup = errno;
-	freeaddrinfo(res);
+	if (sock_res != -1) close(sock_res);
 	errno = errno_backup;
-	return err;
+	return SIPSAK_ERR_SYS;
 }
 
-static sipsak_err init_network_udp_symmetric(struct sipsak_con_data *cd, char const* local_ip) {
+/*static sipsak_err get_connected_socket(struct sockaddr const *remote_addr, socklen_t remote_addr_len, struct sockaddr const *local_addr, socklen_t local_addr_len, int family, int socktype, int protocol, int *sock) {
+	int errno_backup;
+	*sock = socket(family, socktype, protocol);
+	if (*sock < 0) {
+		return SIPSAK_ERR_SYS;
+	}
+	if (bind(*sock, local_addr, local_addr_len) < 0) {
+		goto err;
+	}
+	if (connect(*sock, remote_addr, remote_addr_len) < 0) {
+		goto err;
+	}
+
+	return SIPSAK_ERR_SUCCESS;
+
+err:
+	errno_backup = errno;
+	close(*sock);
+	*sock = -1;
+	errno = errno_backup;
+	return SIPSAK_ERR_SYS;
+}*/
+
+int get_ip_type(struct sipsak_con_data *cd) {
+	return cd->ip_type;
+}
+
+static sipsak_err init_network_udp_non_symmetric(struct sipsak_con_data *cd, struct sipsak_address const *address, char const *local_ip, unsigned int port) {
+	sipsak_err err;
 	int errno_backup;
 
-	sipsak_err err;
+	int ip_family;
+	int created_raw_sock;
+	struct addrinfo *remote_res0, *remote_res;
 
-	struct addrinfo *res;
+	union sipsak_sockaddr local_addr;
+	socklen_t local_addr_len;
 
-	union sipsak_sockaddr listen_adr;
+	struct sipsak_sock_opts opts = {0};
 
-	err = resolve(local_ip, cd->lport, cd->transport, PF_UNSPEC, 1, &res);
+	ip_family = translate_ip_type(address->ip_type);
+
+	cd->transport = SIP_UDP_TRANSPORT;
+	cd->symmetric = 0;
+
+	err = convert_ip_str(local_ip, 0, &local_addr, &local_addr_len);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		return SIPSAK_ERR_IP;
+	}
+
+	if (local_addr.adr.sa_family != ip_family && ip_family != SIPSAK_IPAUTO) {
+		return SIPSAK_ERR_IP_TYPE_MISMATCH;
+	}
+
+	cd->ip_type = local_addr.adr.sa_family;
+
+	err = resolve(address->address, address->port, SIP_UDP_TRANSPORT, cd->ip_type, 0, &remote_res0);
 	if (err != SIPSAK_ERR_SUCCESS) {
 		return err;
 	}
 
-	err = get_bound_socket(res, &cd->csock, &listen_adr, &cd->from_adr_len);
-	if (err != SIPSAK_ERR_SUCCESS) {
-		goto err;
-	}
-	freeaddrinfo(res);
-	get_socket_address(cd->csock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
+	created_raw_sock = 0;
 
 #ifdef RAW_SUPPORT
-	(void)create_raw_sock(listen_adr.adr.sa_family);
-#endif /* RAW_SUPPORT */
-	cd->lport = get_port((struct sockaddr *)&cd->from_adr);
-
-	return SIPSAK_ERR_SUCCESS;
-
-err:
-	errno_backup = errno;
-	freeaddrinfo(res);
-	errno = errno_backup;
-	return err;
-}
-
-static sipsak_err init_network_udp(struct sipsak_con_data *cd, char const* local_ip) {
-	sipsak_err err;
-	if (cd->symmetric) {
-		err = init_network_udp_symmetric(cd, local_ip);
-	} else {
-		err = init_network_udp_non_symmetric(cd, local_ip);
+	for (remote_res = remote_res0; remote_res; remote_res = remote_res->ai_next) {
+		created_raw_sock = create_raw_sock(remote_res->ai_family);
+		if (created_raw_sock) break;
 	}
-	return err;
-}
+#endif
 
-static sipsak_err init_network_tcp(struct sipsak_con_data *cd, char const *local_ip) {
-	int errno_backup;
+	if (!created_raw_sock) {
+		for (remote_res = remote_res0; remote_res; remote_res = remote_res->ai_next) {
+			opts.remote_addr = remote_res->ai_addr;
+			opts.remote_addr_len = remote_res->ai_addrlen;
+			opts.local_addr = (struct sockaddr *)&local_addr;
+			opts.local_addr_len = local_addr_len;
+			opts.family = remote_res->ai_family;
+			opts.socktype = remote_res->ai_socktype;
 
-	sipsak_err err;
-
-	struct addrinfo *res;
-
-	union sipsak_sockaddr listen_adr;
-
-	err = resolve(local_ip, cd->lport, cd->transport, PF_UNSPEC, 1, &res);
-
-	if (err != SIPSAK_ERR_SUCCESS) {
-		return err;
+			err = get_socket(&opts, &cd->csock);
+			if (err == SIPSAK_ERR_SUCCESS) {
+				break;
+			}
+		}
+		if (!remote_res) {
+			goto err;
+		}
 	}
-	err = get_bound_socket(res, &cd->csock, &listen_adr, &cd->from_adr_len);
+
+	//Create the usock no matter what. That is what the original code does.
+	memset(&opts, 0, sizeof(opts));
+	opts.local_addr = (struct sockaddr *)&local_addr;
+	opts.local_addr_len = local_addr_len;
+	opts.family = remote_res->ai_family;
+	opts.socktype = remote_res->ai_socktype;
+
+	err = get_socket(&opts, &cd->usock);
 	if (err != SIPSAK_ERR_SUCCESS) {
 		goto err;
 	}
-	freeaddrinfo(res);
-	get_socket_address(cd->csock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
+	memcpy(&cd->to_adr, remote_res->ai_addr, remote_res->ai_addrlen);
+	cd->to_adr_len = remote_res->ai_addrlen;
+
+	err = get_socket_address(cd->usock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
+	if (err != SIPSAK_ERR_SUCCESS) {
+		goto err;
+	}
+
 	cd->lport = get_port((struct sockaddr *)&cd->from_adr);
+	cd->rport = address->port;
+	freeaddrinfo(remote_res0);
 	return SIPSAK_ERR_SUCCESS;
 
 err:
 	errno_backup = errno;
-	freeaddrinfo(res);
+	freeaddrinfo(remote_res0);
+	if (cd->csock != -1) close(cd->csock);
+	cd->csock = -1;
+	if (cd->usock != -1) close(cd->usock);
+	cd->usock = -1;
 	errno = errno_backup;
+	return err;
+}
+
+static sipsak_err init_network_udp_symmetric(struct sipsak_con_data *cd, struct sipsak_address const *address, char const *local_ip, unsigned int lport) {
+	sipsak_err err;
+	int errno_backup;
+
+	struct addrinfo *remote_res0, *remote_res;
+
+	union sipsak_sockaddr local_addr;
+	socklen_t local_addr_len;
+
+	struct sipsak_sock_opts opts = {0};
+
+	int ip_family;
+
+	cd->transport = SIP_UDP_TRANSPORT;
+	cd->symmetric = 1;
+
+	cd->csock = -1;
+
+	ip_family = translate_ip_type(address->ip_type);
+
+	err = convert_ip_str(local_ip, 0, &local_addr, &local_addr_len);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		return SIPSAK_ERR_IP;
+	}
+
+	if (local_addr.adr.sa_family != ip_family && ip_family != SIPSAK_IPAUTO) {
+		return SIPSAK_ERR_IP_TYPE_MISMATCH;
+	}
+
+	cd->ip_type = local_addr.adr.sa_family;
+
+	err = resolve(address->address, address->port, SIP_UDP_TRANSPORT, cd->ip_type, 0, &remote_res0);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		return err;
+	}
+
+	for (remote_res = remote_res0; remote_res; remote_res = remote_res->ai_next) {
+		opts.remote_addr = remote_res->ai_addr;
+		opts.remote_addr_len = remote_res->ai_addrlen;
+		opts.local_addr = (struct sockaddr *)&local_addr;
+		opts.local_addr_len = local_addr_len;
+		opts.family = remote_res->ai_family;
+		opts.socktype = remote_res->ai_socktype;
+
+		err = get_socket(&opts, &cd->csock);
+		if (err == SIPSAK_ERR_SUCCESS) {
+			break;
+		}
+	}
+	if (!remote_res) {
+		goto err;
+	}
+
+#ifdef RAW_SUPPORT
+	(void)create_raw_sock(remote_res->ai_family);
+#endif
+
+	err = get_socket_address(cd->csock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
+	if (err != SIPSAK_ERR_SUCCESS) {
+		goto err;
+	}
+
+	memcpy(&cd->to_adr, remote_res->ai_addr, remote_res->ai_addrlen);
+	cd->lport = get_port((struct sockaddr *)&cd->from_adr);
+
+	cd->rport = address->port;
+
+	freeaddrinfo(remote_res0);
+	return SIPSAK_ERR_SUCCESS;
+	
+
+err:
+	errno_backup = errno;
+	freeaddrinfo(remote_res0);
+	if (cd->csock != -1)  close(cd->csock);
+	cd->csock = -1;
+	errno = errno_backup;
+	return err;
+}
+
+/*static sipsak_err init_network_udp_symmetric_(struct sipsak_con_data *cd, struct sipsak_address const *address, char const *local_ip, unsigned int lport) {
+	sipsak_err err;
+	int errno_backup;
+
+	struct addrinfo *remote_res0, *remote_res;
+
+	union sipsak_sockaddr local_addr;
+	socklen_t local_addr_len;
+
+	int ip_family;
+
+	cd->transport = SIP_UDP_TRANSPORT;
+	cd->symmetric = 1;
+
+	ip_family = translate_ip_type(address->ip_type);
+
+	err = resolve(address->address, address->port, SIP_UDP_TRANSPORT, ip_family, 0, &remote_res0);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		return err;
+	}
+
+	err = convert_ip_str(local_ip, lport, &local_addr, &local_addr_len);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		freeaddrinfo(remote_res0);
+		return SIPSAK_ERR_IP;
+	}
+
+	for (remote_res = remote_res0; remote_res; remote_res = remote_res->ai_next) {
+		err = get_connected_socket(remote_res->ai_addr, remote_res->ai_addrlen, (struct sockaddr *)&local_addr, local_addr_len, remote_res->ai_family, remote_res->ai_socktype, remote_res->ai_protocol, &cd->csock);
+		if (err != SIPSAK_ERR_SUCCESS) {
+			continue;
+		}
+	}
+
+	if (!remote_res) {
+		errno_backup = errno;
+		freeaddrinfo(remote_res0);
+		cd->csock = -1;
+		errno = errno_backup;
+		return err;
+	}
+
+#ifdef RAW_SUPPORT
+	(void)create_raw_sock(remote_res->ai_family);
+#endif
+
+	err = get_socket_address(cd->csock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
+	if (err != SIPSAK_ERR_SUCCESS) {
+		goto err;
+	}
+	memcpy(&cd->to_adr, remote_res->ai_addr, remote_res->ai_addrlen);
+	cd->lport = get_port((struct sockaddr *)&cd->from_adr);
+
+	cd->rport = address->port;
+
+	freeaddrinfo(remote_res0);
+	return SIPSAK_ERR_SUCCESS;
+
+err:
+	errno_backup = errno;
+	freeaddrinfo(remote_res0);
+	if (cd->csock != -1) close(cd->csock);
+	cd->csock = -1;
+	errno = errno_backup;
+	return err;
+
+}*/
+
+static sipsak_err init_network_tcp(struct sipsak_con_data *cd, struct sipsak_address const *address, char const *local_ip, unsigned int port) {
+	sipsak_err err;
+	int errno_backup;
+
+	struct addrinfo *remote_res0, *remote_res;
+
+	struct sipsak_sock_opts opts = {0};
+
+	union sipsak_sockaddr local_addr;
+	socklen_t local_addr_len;
+
+	int ip_family;
+
+	cd->transport = SIP_TCP_TRANSPORT;
+
+	ip_family = translate_ip_type(address->ip_type);
+
+	err = convert_ip_str(local_ip, 0, &local_addr, &local_addr_len);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		return SIPSAK_ERR_IP;
+	}
+
+	if (local_addr.adr.sa_family != ip_family && ip_family != SIPSAK_IPAUTO) {
+		return SIPSAK_ERR_IP_TYPE_MISMATCH;
+	}
+
+	cd->ip_type = local_addr.adr.sa_family;
+
+	err = resolve(address->address, address-port, SIP_TCP_TRANSPORT, cd->ip_type, 0, &remote_res0);
+	if (err != SIPSAK_ERR_SUCCESS) {
+		return err;
+	}
+
+	for (remote_res = remote_res0; remote_res; remote_res = remote_res->ai_next) {
+		opts.remote_addr = remote_res->ai_addr;
+		opts.remote_addr_len = remote_res->ai_addrlen;
+		opts.local_addr = (struct sockaddr *)&local_addr;
+		opts.local_addr_len = local_addr_len;
+		opts.family = remote_res->ai_family;
+		opts.socktype = remote_res->ai_socktype;
+
+		err = get_socket(&opts, &cd->csock);
+		if (err == SIPSAK_ERR_SUCCESS) {
+			break;
+		}
+	}
+	if (!remote_res) {
+		goto err;
+	}
+
+	err = get_socket_address(cd->csock, (struct sockaddr *)&cd->from_adr, sizeof(cd->from_adr));
+	cd->lport = get_port((struct sockaddr *)&cd->from_adr);
+	memcpy(&cd->to_adr, remote_res->ai_addr, remote_res->ai_addrlen);
+	cd->rport = address->port;
+	freeaddrinfo(remote_res0);
+	return SIPSAK_ERR_SUCCESS;
+
+
+err:
+	errno_backup = errno;
+	freeaddrinfo(remote_res0);
+	errno = errno_backup;
+	return err;
+}
+
+static sipsak_err init_network_udp(struct sipsak_con_data *cd, struct sipsak_address const *address, char const *local_ip, unsigned int lport, int symmetric) {
+	sipsak_err err;
+	if (symmetric) {
+		err = init_network_udp_symmetric(cd, address, local_ip, lport);
+	} else {
+		err = init_network_udp_non_symmetric(cd, address, local_ip, lport);
+	}
 	return err;
 }
 
 #ifdef WITH_TLS_TRANSP
-static sipsak_err init_network_tls(struct sipsak_con_data *cd, char const *local_ip, char const *ca_file) {
+static sipsak_err init_network_tls(struct sipsak_con_data *cd, struct sipsak_address const *address, char const *local_ip, unsigned int lport, char const *ca_file) {
 	sipsak_err err;
 #ifdef USE_GNUTLS
 	tls_session = NULL;
@@ -887,7 +1298,7 @@ static sipsak_err init_network_tls(struct sipsak_con_data *cd, char const *local
 #endif
 #endif
 
-	err = init_network_tcp(cd, local_ip);
+	err = init_network_tcp(cd, address, local_ip, lport);
 	if (err != SIPSAK_ERR_SUCCESS) {
 		return err;
 	}
@@ -925,29 +1336,34 @@ static sipsak_err init_network_tls(struct sipsak_con_data *cd, char const *local
 }
 #endif
 
-sipsak_err init_network(struct sipsak_con_data *cd, char const *local_ip, char const *ca_file) {
+sipsak_err init_network(struct sipsak_con_data *cd, struct sipsak_address const *address, char const *local_ip, unsigned int lport, int symmetric, char const *ca_file) {
 	sipsak_err err;
 
-	/*TODO: deal with target_dot and source_dot*/
+	cd->usock = -1;
+	cd->csock = -1;
+	cd->transport = 0;
+	cd->symmetric = symmetric;
 
-	/*TODO: deal with raw socket support*/
-
-	switch (cd->transport) {
+	switch (address->transport) {
 #ifdef WITH_TLS_TRANSP
 		case SIP_TLS_TRANSPORT:
+			printf("TLS\n");
 			transport_str = TRANSPORT_TLS_STR;
-			err = init_network_tls(cd, local_ip, ca_file);
+			err = init_network_tls(cd, address, local_ip, lport, ca_file);
 			break;
 #endif
 		case SIP_TCP_TRANSPORT:
+			printf("TCP\n");
 			transport_str = TRANSPORT_TCP_STR;
-			err = init_network_tcp(cd, local_ip);
+			err = init_network_tcp(cd, address, local_ip, lport);
 			break;
 		case SIP_UDP_TRANSPORT:
+			printf("UDP\n");
 			transport_str = TRANSPORT_UDP_STR;
-			err = init_network_udp(cd, local_ip);
+			err = init_network_udp(cd, address, local_ip, lport, symmetric);
 			break;
 		default:
+			printf("default\n");
 			err = SIPSAK_ERR_UNKNOWN_SIP_TRANSPORT;
 	}
 
@@ -978,11 +1394,15 @@ static sipsak_err send_message_tls(char *mes, struct sipsak_con_data *cd) {
 static sipsak_err send_message_plain(char *mes, struct sipsak_con_data *cd) {
 	if (cd->csock == -1) {
 		dbg("\nusing un-connected socket for sending\n");
+		printf("\nusing un-connected socket for sending\n");
+		printf("USOCK: %d\n", cd->usock);
+		printf("MES: %s\n", mes);
 		if (sendto(cd->usock, mes, strlen(mes), 0, (struct sockaddr *)&cd->to_adr, cd->to_adr_len) < 0) {
 			return SIPSAK_ERR_SEND;
 		}
 	} else {
 		dbg("\nusing connected socket for sending\n");
+		printf("\nusing connected socket for sending\n");
 		if (send(cd->csock, mes, strlen(mes), 0) < 0) {
 			return SIPSAK_ERR_SEND;
 		}
@@ -1237,12 +1657,12 @@ struct sipsak_address const *get_cur_address(struct sipsak_con_data *cd) {
 	return cd->cur_address == (size_t)-1 || cd->cur_address >= cd->num_addresses ? NULL : &cd->addresses[cd->cur_address];
 }
 
-void set_addresses(struct sipsak_con_data *cd, struct sipsak_address *addresses, size_t num_addresses) {
+/*void set_addresses(struct sipsak_con_data *cd, struct sipsak_address *addresses, size_t num_addresses) {
 	destroy_sipsak_addresses(cd->addresses, cd->num_addresses);
 	cd->addresses = addresses;
 	cd->num_addresses = num_addresses;
 	cd->cur_address = -1;
-}
+}*/
 
 int complete_mes(char *mes, int size) {
 	int cl = 0, headers = 0, len = 0;
@@ -1702,7 +2122,6 @@ static sipsak_err set_target_udp(struct sipsak_con_data *cd) {
 	sipsak_err err;
 
 	struct addrinfo *res;
-
 
 	memset(&cd->to_adr, 0, sizeof(cd->to_adr));
 

@@ -135,6 +135,7 @@
 #define SIP_TLS_TRANSPORT 1
 #define SIP_TCP_TRANSPORT 2
 #define SIP_UDP_TRANSPORT 3
+#define SIP_ANY_TRANSPORT 4
 
 #define TRANSPORT_TLS_STR "TLS"
 #define TRANSPORT_TCP_STR "TCP"
@@ -171,7 +172,9 @@ union sipsak_sockaddr {
 
 struct sipsak_address {
   char *address;
-  in_port_t port;
+  int transport;
+  int ip_type;
+  unsigned short port;
 };
 
 struct sipsak_options {
@@ -201,9 +204,11 @@ struct sipsak_options {
   int expires_t;
   int rand_rem;
   int timer_t1;
-  int ip_type_pref;
+  int ip_type;
   int ignore_ca_fail;
+  unsigned int remote_port;
   enum sipsak_modes mode;
+  char *remote_host;
   char *password;
   char *mes_body;
   char *from_uri;
@@ -215,7 +220,7 @@ struct sipsak_options {
   char *local_ip;
   char *con_dis;
   char *username;
-  char *domainname;
+  char *domainname; //This is the intended destination's domainname.
   //char *address;
   struct sipsak_address *addresses;
   size_t num_addresses;

@@ -338,6 +338,8 @@ int main(int argc, char *argv[])
 		print_help();
 	}
 
+	//options.ip_type_pref = ;
+
 	/* lots of command line switches to handle*/
 #ifdef HAVE_GETOPT_LONG
 	while ((c=getopt_long(argc, argv, "a:A:b:B:c:C:dD:e:E:f:Fg:GhH:iIj:J:k:K:l:Lm:MnNo:O:p:P:q:r:Rs:St:Tu:UvVwW:x:z:Z:", l_opts, &option_index)) != EOF){
@@ -358,7 +360,7 @@ int main(int argc, char *argv[])
 #ifdef WITH_TLS_TRANSP
 				else if (STRNCASECMP("tls-ca-cert", l_opts[option_index].name, 11) == 0) {
 					pf = fopen(optarg, "rb");
-					if (!pf){
+					if (!pf){ 
 						fprintf(stderr, "error: unable to open the CA cert file '%s'.\n", optarg);
 						exit_code(2, __PRETTY_FUNCTION__, "failed to open CA cert file");
 					}
@@ -613,7 +615,9 @@ int main(int argc, char *argv[])
 					fprintf(stderr, "error: missing in host in outbound proxy\n");
 					exit_code(2, __PRETTY_FUNCTION__, "missing host in outbound proxy");
 				}
-				options.num_addresses = get_addresses(&options.addresses, host, port, &tsp);
+				options.remote_host = host;
+				options.remote_port = port;
+				//options.num_addresses = get_addresses(&options.addresses, host, port, &tsp);
 				if (options.transport == 0) options.transport = tsp;
 
 				/*if (is_ip(host)) {
@@ -676,7 +680,7 @@ int main(int argc, char *argv[])
 				options.mode = SM_RANDTRASH;
 				break;
 			case 's':
-				parse_uri(optarg, &scheme, &user, &host, &port);
+				parse_uri(optarg, &scheme, &options.username, &host, &port);
 				if (scheme == NULL) {
 					fprintf(stderr, "error: missing scheme in SIP URI\n");
 					exit_code(2, __PRETTY_FUNCTION__, "missing scheme in target SIP URI");
@@ -702,10 +706,15 @@ int main(int argc, char *argv[])
 				//if (port && !options.rport) {
 				//	options.rport = port;
 				//}
-				if (!options.addresses) {
-					options.num_addresses = get_addresses(&options.addresses, options.domainname, port, &options.transport);
+				if (!options.remote_host) {
+					options.remote_host = options.domainname;
+					options.remote_port = port;
 					if (options.transport == 0) options.transport = tsp;
 				}
+				/*if (!options.addresses) {
+					options.num_addresses = get_addresses(&options.addresses, options.domainname, port, options.transport, options.ip_type_pref);
+					if (options.transport == 0) options.transport = tsp;
+				}*/
 				/*if (is_ip(options.domainname) && !options.addresses) {
 					options.address = getaddress(options.domainname);
 					if (options.transport == 0)

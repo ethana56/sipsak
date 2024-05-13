@@ -28,13 +28,13 @@ struct sipsak_msg_data {
   char *repl_buff;
   char *username;
   char *usern;
-  char *domainname;
+  char *domainname; //This is the indended destination's domainname
   char *contact_uri;
   char *con_dis;
   char *from_uri;
   char *mes_body;
   char *headers;
-  char *fqdn;
+  char *fqdn; //This is the local domainname
 };
 
 void create_msg(int action, struct sipsak_msg_data *data);
