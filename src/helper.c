@@ -69,11 +69,6 @@
   #error Missing check unit test framework!
 #endif
 
-
-char const *create_uri_hostname(char const *hostname, size_t hostname_len) {
-
-}
-
 char const *ip_to_str(struct sockaddr *adr, char *buf, size_t buf_len) {
 	char const *res;
 	switch (adr->sa_family) {

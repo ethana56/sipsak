@@ -1276,6 +1276,7 @@ static sipsak_err init_network_udp(struct sipsak_con_data *cd, struct sipsak_add
 	return err;
 }
 
+
 #ifdef WITH_TLS_TRANSP
 static sipsak_err init_network_tls(struct sipsak_con_data *cd, struct sipsak_address const *address, char const *local_ip, unsigned int lport, char const *ca_file) {
 	sipsak_err err;
