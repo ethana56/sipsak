@@ -1036,7 +1036,7 @@ void shoot(char *buf, int buff_size, struct sipsak_options *options)
 		msg_data.fqdn = safe_malloc(local_ip_cpy_len);
 		memcpy(msg_data.fqdn, options->local_ip, local_ip_cpy_len);
 	} else {
-		err = alloc_local_address_str(&connection, options->numeric, &local_address_buf);
+		err = alloc_local_address_str(&connection, options->numeric, &msg_data.fqdn);
 		if (err != SIPSAK_ERR_SUCCESS) {
 			print_err("Error getting the local address for the FQDN", err);
 			exit_code(3, __PRETTY_FUNCTION__, "error getting fqdn");
