@@ -254,6 +254,8 @@ int main(int argc, char *argv[])
 	int 	upp;
   struct sipsak_options options;
 
+  scheme = user = host = backup = NULL;
+
 #ifdef HAVE_GETOPT_LONG
 	int option_index = 0;
 	static struct option l_opts[] = {
