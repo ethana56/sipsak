@@ -1229,7 +1229,7 @@ static sipsak_err init_network_tcp(struct sipsak_con_data *cd, struct sipsak_add
 
 	cd->ip_type = local_addr.adr.sa_family;
 
-	err = resolve(address->address, address-port, SIP_TCP_TRANSPORT, cd->ip_type, 0, &remote_res0);
+	err = resolve(address->address, address->port, SIP_TCP_TRANSPORT, cd->ip_type, 0, &remote_res0);
 	if (err != SIPSAK_ERR_SUCCESS) {
 		return err;
 	}
@@ -1873,7 +1873,7 @@ sipsak_err recv_message(char *buf, size_t buf_size, int inv_trans, struct sipsak
 	int sock = 0;
 	int recv_ret;
 	double tmp_delay;
-	union sipsak_sockaddr fadr;
+	//union sipsak_sockaddr fadr;
 
 	*num_read = 0;
 
