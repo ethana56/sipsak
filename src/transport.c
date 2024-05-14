@@ -668,7 +668,7 @@ static sipsak_err resolve(char const *address, unsigned int port, int transport,
 	sip_transport_to_sock_info(transport, &hints.ai_socktype, &hints.ai_protocol);
 	hints.ai_family = family;
 	hints.ai_flags = binding ? AI_PASSIVE : 0;
-	hints.ai_flags |= AI_UNUSABLE;
+	//hints.ai_flags |= AI_UNUSABLE;
 
 	(void)snprintf(port_str, sizeof(port_str), "%hu", port);
 	addrinfo_res = getaddrinfo(address, port_str, &hints, adrs);
